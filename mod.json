@@ -5,34 +5,50 @@
 	},
 	"id": "twizzymik.structure-tools",
 	"name": "Structure Tools",
-	"version": "v0.1.0",
+	"version": "v0.2.0",
 	"developer": "twizzymik",
-	"description": "Auto-builds level structure in the editor. Stage 1: fill pillars under platforms.",
+	"description": "Auto-builds level structure in the editor. Pillars down and up.",
 	"tags": ["editor", "utility"],
 	"settings": {
 		"fill-block-id": {
 			"type": "int",
-			"name": "Fill Block ID",
-			"description": "Object ID used to fill pillars. <cy>0</c> = use the same block as the platform (solid blocks only). Slopes always need an ID here. Easiest way to set it: select ONE block in the editor and press <cg>Pick ID</c>.",
+			"name": "Pillar Block ID",
+			"description": "Object ID that pillars are built from. Use the block variant with lines on the <cy>sides only</c> so the pillar looks continuous. Easiest way to set it: select ONE block in the editor and press <cg>Pick</c>. <cy>0</c> = fall back to the platform's own block (solid blocks only; slopes always need an ID).",
 			"default": 0,
 			"min": 0,
 			"max": 5000
 		},
+		"max-rows": {
+			"type": "int",
+			"name": "Max Pillar Height",
+			"description": "The most blocks one pillar can have.",
+			"default": 5,
+			"min": 1,
+			"max": 30
+		},
 		"ground-y": {
 			"type": "float",
 			"name": "Ground Row Y",
-			"description": "Y position of the lowest block row sitting on the ground. In the normal editor this is <cy>105</c>. Pillars stop here.",
+			"description": "Y position of the lowest block row sitting on the ground. In the normal editor this is <cy>105</c>. Downward pillars never go below this.",
 			"default": 105,
 			"min": 0,
 			"max": 3000
 		},
-		"max-rows": {
-			"type": "int",
-			"name": "Max Pillar Height",
-			"description": "Safety limit: the most blocks one pillar can have (in rows).",
-			"default": 100,
-			"min": 1,
-			"max": 500
+		"button-offset-x": {
+			"type": "float",
+			"name": "Button Offset X",
+			"description": "Nudge the Down / Up / Pick buttons left (negative) or right (positive). Takes effect next time you open the editor.",
+			"default": 0,
+			"min": -400,
+			"max": 400
+		},
+		"button-offset-y": {
+			"type": "float",
+			"name": "Button Offset Y",
+			"description": "Nudge the Down / Up / Pick buttons down (negative) or up (positive). Takes effect next time you open the editor.",
+			"default": 0,
+			"min": -200,
+			"max": 400
 		}
 	}
 }
