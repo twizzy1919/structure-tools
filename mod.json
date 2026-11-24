@@ -5,9 +5,9 @@
 	},
 	"id": "twizzymik.structure-tools",
 	"name": "Structure Tools",
-	"version": "v0.7.0",
+	"version": "v0.8.0",
 	"developer": "twizzymik",
-	"description": "Auto-builds level structure in the editor: pillars and enclosures.",
+	"description": "Auto-builds level structure in the editor: pillars, enclosures and chamfered shapes.",
 	"tags": [
 		"editor",
 		"utility"
@@ -16,11 +16,12 @@
 		"style": {
 			"type": "string",
 			"name": "Style",
-			"description": "Structuring style used by the menu. Pillars grows pillars from platforms. Enclose closes the selected blocks/slopes in with the fewest blocks that give every edge a line.",
+			"description": "Structuring style used by the menu. Pillars grows pillars from platforms. Enclose closes blocks/slopes in with the fewest blocks. Shapes builds a chamfered blob around each group of blocks/slopes.",
 			"default": "Pillars",
 			"one-of": [
 				"Pillars",
-				"Enclose"
+				"Enclose",
+				"Shapes"
 			]
 		},
 		"direction": {
@@ -49,6 +50,30 @@
 			"default": 50,
 			"min": 0,
 			"max": 100
+		},
+		"shape-padding": {
+			"type": "int",
+			"name": "Shape Padding",
+			"description": "Shapes style: how many cells the shape extends past the blocks (each side varies by 1 either way).",
+			"default": 2,
+			"min": 1,
+			"max": 6
+		},
+		"shape-max-cut": {
+			"type": "int",
+			"name": "Shape Max Corner Cut",
+			"description": "Shapes style: the largest diagonal cut on a corner, in cells. Bigger = more octagon-like.",
+			"default": 4,
+			"min": 1,
+			"max": 8
+		},
+		"shape-link-distance": {
+			"type": "int",
+			"name": "Shape Link Distance",
+			"description": "Shapes style: blocks within this many cells of each other become one shape.",
+			"default": 3,
+			"min": 1,
+			"max": 6
 		},
 		"ground-y": {
 			"type": "float",
