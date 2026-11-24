@@ -5,24 +5,34 @@
 	},
 	"id": "twizzymik.structure-tools",
 	"name": "Structure Tools",
-	"version": "v0.5.0",
+	"version": "v0.6.0",
 	"developer": "twizzymik",
-	"description": "Auto-builds level structure in the editor. Pillars so far.",
-	"tags": ["editor", "utility"],
+	"description": "Auto-builds level structure in the editor: pillars and enclosures.",
+	"tags": [
+		"editor",
+		"utility"
+	],
 	"settings": {
 		"style": {
 			"type": "string",
 			"name": "Style",
-			"description": "Structuring style used by the Auto button. More styles are coming.",
+			"description": "Structuring style used by the menu. Pillars grows pillars from platforms. Enclose closes the selected blocks/slopes in with the fewest blocks that give every edge a line.",
 			"default": "Pillars",
-			"one-of": ["Pillars"]
+			"one-of": [
+				"Pillars",
+				"Enclose"
+			]
 		},
 		"direction": {
 			"type": "string",
 			"name": "Direction",
 			"description": "<cy>Auto</c> reads the lines on each block: top line = grows down, bottom line = grows up. Down / Up force one direction for everything.",
 			"default": "Auto",
-			"one-of": ["Auto", "Down", "Up"]
+			"one-of": [
+				"Auto",
+				"Down",
+				"Up"
+			]
 		},
 		"max-rows": {
 			"type": "int",
@@ -31,6 +41,14 @@
 			"default": 5,
 			"min": 1,
 			"max": 30
+		},
+		"corner-slope-chance": {
+			"type": "int",
+			"name": "Corner Slope Chance (%)",
+			"description": "Enclose style: chance that an outer corner is a 45\u00b0 slope instead of a block. 0 = always blocks, 100 = always slopes.",
+			"default": 50,
+			"min": 0,
+			"max": 100
 		},
 		"ground-y": {
 			"type": "float",
