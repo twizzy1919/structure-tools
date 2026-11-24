@@ -1,27 +1,24 @@
-// Structure Tools v0.3 - Auto Structure (Pillars style)
+// Structure Tools v0.4 - Auto Structure (Pillars style)
 //
-// One "Auto" button in the Edit tab. Press it:
-//   - with objects selected  -> only the selection is structured
-//   - with nothing selected  -> the whole level is scanned
+// One "Auto" button in the Edit tab:
+//   - objects selected  -> only the selection is structured
+//   - nothing selected  -> the whole level is scanned
 //
-// Direction is read from the lines on each block (Direction setting = Auto):
-//   line on TOP, none on bottom    -> platform faces up   -> pillar grows DOWN
-//   line on BOTTOM, none on top    -> platform is upside down -> pillar grows UP
-//   (a 3-line block therefore points away from its empty side; a Top+Left block goes down)
-// Slopes use whichever flat side faces away from the slope.
+// Direction (Direction setting = Auto):
+//   Blocks: line on TOP (none on bottom) -> pillar grows DOWN; line on BOTTOM -> grows UP.
+//   Slopes: every right-triangle slope has one HORIZONTAL flat leg. If that leg is on the
+//           bottom the pillar grows down from it, if it is on the top the pillar grows up.
+//           The 2x1 slope (1744) has a 2-cell leg and a 1-cell leg: when the long leg is
+//           horizontal the pillar is 2 wide, when the slope is stood on its end the
+//           horizontal leg is the short one and the pillar is 1 wide.
 //
-// Pillar block variants (IDs confirmed in-game):
-//   2 = top line only, 3 = top+left, 5 = no lines, 6 = top+left+right, 7 = left+right
-//   1743 = 45 degree slope
-// A pillar cell picks its look from its neighbours (other pillar columns):
-//   no neighbour either side -> ID 7        (lines left + right)
-//   neighbour on the right   -> ID 2 rot 270 (line on the left only)
-//   neighbour on the left    -> ID 2 rot 90  (line on the right only)
-//   neighbours both sides    -> ID 5        (no lines)
+// Block IDs (confirmed in-game):
+//   2 = top line, 3 = top+left, 5 = no lines, 6 = top+left+right, 7 = left+right
+//   1743 = 45 degree slope, 1744 = 2x1 slope
+// Pillar cell look is chosen from neighbouring pillar columns:
+//   no neighbours -> ID 7;  neighbour right -> ID 2 rot 270;  neighbour left -> ID 2 rot 90;
+//   neighbours both sides -> ID 5.
 // Spikes are never added.
-//
-// Off-grid: every new block uses the same X as its source and a Y exactly 30 units
-// further, so pillars stay on the platform's own sub-grid.
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
@@ -29,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -46,6 +44,7 @@ constexpr int ID_TOP = 2;
 constexpr int ID_NONE = 5;
 constexpr int ID_SIDES = 7;
 constexpr int ID_SLOPE45 = 1743;
+constexpr int ID_SLOPE2X1 = 1744;
 
 enum class Side { Top, Right, Bottom, Left };
 
@@ -69,7 +68,7 @@ Side rotateCW(Side s) {
     }
 }
 
-// Applies the object's flips and rotation to a list of sides. false = not a multiple of 90.
+// Applies the object's flips and rotation. false = rotation is not a multiple of 90.
 bool transformSides(GameObject* obj, std::vector<Side>& sides) {
     float rot = std::fmod(obj->getRotation(), 360.f);
     if (rot < 0.f) rot += 360.f;
@@ -89,7 +88,6 @@ bool has(std::vector<Side> const& v, Side s) {
     return std::find(v.begin(), v.end(), s) != v.end();
 }
 
-// Lines each known block variant has when unrotated.
 bool baseLines(int id, std::vector<Side>& out) {
     switch (id) {
         case 2: out = { Side::Top }; return true;
@@ -130,41 +128,64 @@ struct OccupancyIndex {
     }
 };
 
-// One planned pillar: a column of cells growing from a source object.
+// A pillar starting point. y = centre of the FIRST cell to place, dir = -1 down / +1 up.
+struct Source {
+    float x = 0.f;
+    float y = 0.f;
+    int dir = 0;
+};
+
 struct Pillar {
     float x = 0.f;
     std::vector<float> ys;
 };
 
-// Direction for one source object: -1 down, +1 up, 0 = can't tell / skip.
-int decideDirection(GameObject* obj, std::string const& setting, bool wholeLevel) {
-    int forced = setting == "Down" ? -1 : setting == "Up" ? +1 : 0;
-    bool isSlope = obj->m_objectType == GameObjectType::Slope;
+enum class SrcResult { Ok, Skip, Unknown };
 
-    if (isSlope) {
-        // unrotated 45 slope: flat legs are Bottom and Right
-        std::vector<Side> legs = { Side::Bottom, Side::Right };
-        if (!transformSides(obj, legs)) return 0;
-        bool b = has(legs, Side::Bottom), t = has(legs, Side::Top);
-        if (forced < 0) return b ? -1 : 0;
-        if (forced > 0) return t ? +1 : 0;
-        return b ? -1 : (t ? +1 : 0);
+// Turns one block/slope into zero or more pillar starting points.
+SrcResult makeSources(GameObject* obj, std::string const& setting, std::vector<Source>& out) {
+    int forced = setting == "Down" ? -1 : setting == "Up" ? +1 : 0;
+    float px = obj->getPositionX();
+    float py = obj->getPositionY();
+
+    if (obj->m_objectType == GameObjectType::Slope) {
+        // Unrotated slope: flat legs are Bottom (long leg on the 2x1) and Right (1 cell).
+        std::vector<Side> sides = { Side::Bottom, Side::Right };
+        int lens[2] = { obj->m_objectID == ID_SLOPE2X1 ? 2 : 1, 1 };
+        if (!transformSides(obj, sides)) return SrcResult::Skip;
+
+        int h = (sides[0] == Side::Top || sides[0] == Side::Bottom) ? 0 : 1; // horizontal leg
+        int v = 1 - h;                                                         // vertical leg
+        int dir = sides[h] == Side::Bottom ? -1 : +1;
+        if (forced != 0 && forced != dir) return SrcResult::Skip;
+
+        // The vertical leg is the slope's height. First cell sits half a cell past its edge.
+        float halfHeight = static_cast<float>(lens[v]) * GRID / 2.f;
+        float yFirst = py + static_cast<float>(dir) * (halfHeight + GRID / 2.f);
+        int cols = lens[h];
+        for (int i = 0; i < cols; ++i) {
+            float x = px + (static_cast<float>(i) - static_cast<float>(cols - 1) / 2.f) * GRID;
+            out.push_back({ x, yFirst, dir });
+        }
+        return SrcResult::Ok;
     }
 
-    if (forced != 0) return forced;
-
-    std::vector<Side> lines;
-    if (!baseLines(obj->m_objectID, lines)) return 0;
-    if (!transformSides(obj, lines)) return 0;
-    bool t = has(lines, Side::Top), b = has(lines, Side::Bottom);
-    if (t && !b) return -1;
-    if (b && !t) return +1;
-    (void)wholeLevel;
-    return 0;
+    int dir = forced;
+    if (dir == 0) {
+        std::vector<Side> lines;
+        if (!baseLines(obj->m_objectID, lines)) return SrcResult::Unknown;
+        if (!transformSides(obj, lines)) return SrcResult::Skip;
+        bool t = has(lines, Side::Top), b = has(lines, Side::Bottom);
+        if (t && !b) dir = -1;
+        else if (b && !t) dir = +1;
+        else return SrcResult::Skip; // side-only or no lines: no up/down to read
+    }
+    out.push_back({ px, py + static_cast<float>(dir) * GRID, dir });
+    return SrcResult::Ok;
 }
 
-void alert(char const* text) {
-    FLAlertLayer::create("Structure Tools", text, "OK")->show();
+void alert(std::string const& text) {
+    FLAlertLayer::create("Structure Tools", text.c_str(), "OK")->show();
 }
 
 } // namespace
@@ -206,7 +227,6 @@ public:
     }
 
     void onAutoStructure(CCObject*) {
-        // Only one style exists so far; the setting is here for the next ones.
         auto style = Mod::get()->getSettingValue<std::string>("style");
         if (style == "Pillars") this->runPillars();
     }
@@ -217,43 +237,55 @@ public:
         float groundY = static_cast<float>(Mod::get()->getSettingValue<double>("ground-y"));
         int maxRows = static_cast<int>(Mod::get()->getSettingValue<int64_t>("max-rows"));
 
-        // 1) Source objects: the selection, or the whole level if nothing is selected.
         auto selected = this->getSelectedObjects();
         bool wholeLevel = !selected || selected->count() == 0;
         CCArray* pool = wholeLevel ? lel->m_objects : selected;
 
-        // Extreme source per (column, direction): lowest for down, highest for up.
-        std::map<std::pair<long, int>, GameObject*> sources;
+        // 1) Starting points; keep the extreme one per (column, direction).
+        std::map<std::pair<long, int>, Source> sources;
         int skipped = 0;
+        std::set<int> unknownIds;
         for (auto obj : CCArrayExt<GameObject*>(pool)) {
             bool solid = obj->m_objectType == GameObjectType::Solid;
             bool slope = obj->m_objectType == GameObjectType::Slope;
             if (!solid && !slope) continue;
 
+            int id = obj->m_objectID;
             if (wholeLevel) {
-                // only scan blocks/slopes from the line family we know
-                int id = obj->m_objectID;
-                bool known = id == 2 || id == 3 || id == 6 || id == ID_SLOPE45;
-                if (!known) continue;
+                bool known = id == 2 || id == 3 || id == 6 ||
+                             id == ID_SLOPE45 || id == ID_SLOPE2X1;
+                if (!known) {
+                    // 5 and 7 are the pillar fillers themselves; everything else is reported.
+                    if (id != ID_NONE && id != ID_SIDES) unknownIds.insert(id);
+                    continue;
+                }
             }
 
-            int dir = decideDirection(obj, setting, wholeLevel);
-            if (dir == 0) { ++skipped; continue; }
+            std::vector<Source> list;
+            auto res = makeSources(obj, setting, list);
+            if (res == SrcResult::Unknown) { unknownIds.insert(id); ++skipped; continue; }
+            if (res == SrcResult::Skip) { ++skipped; continue; }
 
-            std::pair<long, int> key = { std::lround(obj->getPositionX() * 2.f), dir };
-            auto it = sources.find(key);
-            bool better = it == sources.end() ||
-                (dir < 0 ? obj->getPositionY() < it->second->getPositionY()
-                         : obj->getPositionY() > it->second->getPositionY());
-            if (better) sources[key] = obj;
+            for (auto& s : list) {
+                std::pair<long, int> key = { std::lround(s.x * 2.f), s.dir };
+                auto it = sources.find(key);
+                bool better = it == sources.end() ||
+                    (s.dir < 0 ? s.y < it->second.y : s.y > it->second.y);
+                if (better) sources[key] = s;
+            }
         }
 
         if (sources.empty()) {
-            alert(
+            std::string msg =
                 "No platform found. Auto direction reads the lines on the block: a "
                 "<cy>top line</c> grows the pillar down, a <cy>bottom line</c> grows it up. "
-                "Set <cy>Direction</c> in the mod settings if your blocks are another variant."
-            );
+                "Set <cy>Direction</c> in the mod settings if your blocks are another variant.";
+            if (!unknownIds.empty()) {
+                msg += "\n\nUnknown block IDs: ";
+                int n = 0;
+                for (int i : unknownIds) { if (n++) msg += ", "; msg += std::to_string(i); if (n >= 12) break; }
+            }
+            alert(msg);
             return;
         }
 
@@ -263,22 +295,23 @@ public:
             if (isBlocking(obj)) index.add(obj);
         }
 
-        // 3) Plan every pillar first, so neighbours are known before variants are chosen.
+        // 3) Plan every pillar first so neighbours are known before variants are chosen.
         std::vector<Pillar> pillars;
         int total = 0;
+        int blockedAtStart = 0;
         for (auto& [key, src] : sources) {
             if (total >= MAX_TOTAL_BLOCKS) break;
-            int dir = key.second;
             Pillar p;
-            p.x = src->getPositionX();
-            for (int row = 1; row <= maxRows; ++row) {
-                float y = src->getPositionY() + static_cast<float>(dir) * GRID * static_cast<float>(row);
-                if (dir < 0 && y < groundY - 0.5f) break;
+            p.x = src.x;
+            for (int row = 0; row < maxRows; ++row) {
+                float y = src.y + static_cast<float>(src.dir) * GRID * static_cast<float>(row);
+                if (src.dir < 0 && y < groundY - 0.5f) break;
                 if (index.occupied(p.x, y)) break;
                 p.ys.push_back(y);
                 ++total;
             }
-            if (!p.ys.empty()) pillars.push_back(std::move(p));
+            if (p.ys.empty()) ++blockedAtStart;
+            else pillars.push_back(std::move(p));
         }
 
         if (pillars.empty()) {
@@ -286,7 +319,6 @@ public:
             return;
         }
 
-        // Lookup of pillars by X (half-unit precision) for neighbour checks.
         std::unordered_map<long, std::vector<Pillar const*>> byX;
         for (auto& p : pillars) byX[std::lround(p.x * 2.f)].push_back(&p);
 
@@ -334,6 +366,17 @@ public:
 
         std::string msg = fmt::format("Placed {} blocks in {} pillars", placed, pillars.size());
         if (skipped > 0) msg += fmt::format(" ({} skipped)", skipped);
+        if (blockedAtStart > 0) msg += fmt::format(" ({} blocked)", blockedAtStart);
         Notification::create(msg, placed > 0 ? NotificationIcon::Success : NotificationIcon::Warning)->show();
+
+        // Explain what was ignored so missing pillars can be diagnosed.
+        if (!unknownIds.empty()) {
+            std::string detail =
+                "Some blocks were ignored because their IDs aren't in my table yet. "
+                "Tell me these IDs and which edges have lines on each, and I'll add them.\n\nIDs: ";
+            int n = 0;
+            for (int i : unknownIds) { if (n++) detail += ", "; detail += std::to_string(i); if (n >= 12) break; }
+            alert(detail);
+        }
     }
 };
