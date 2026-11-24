@@ -18,6 +18,6 @@ Nothing selected scans the whole level, otherwise only the selection. Wide platf
 
 ## Enclose
 
-Select the blocks or slopes you want to close in, then press Structure. The mod adds the fewest blocks needed so every exposed edge has a line. Outer corners are randomly a block or a 45° slope (see *Corner Slope Chance* in settings).
+Nothing selected scans the whole level; with a selection only the selection is enclosed. The mod adds the fewest blocks needed so every exposed edge has a line. Outer corners are randomly a block or a 45° slope (see *Corner Slope Chance* in settings). Structures that touch merge into one, and one-cell gaps between them are filled. Existing blocks whose lines would become seams are swapped for the right variant (press Ctrl+Z twice to undo those).
 
 Ctrl+Z undoes a whole run.
