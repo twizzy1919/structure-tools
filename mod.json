@@ -3,10 +3,10 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"id": "yourname.structure-tools",
+	"id": "twizzymik.structure-tools",
 	"name": "Structure Tools",
 	"version": "v0.1.0",
-	"developer": "YourName",
+	"developer": "twizzymik",
 	"description": "Auto-builds level structure in the editor. Stage 1: fill pillars under platforms.",
 	"tags": ["editor", "utility"],
 	"settings": {
