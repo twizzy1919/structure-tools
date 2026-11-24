@@ -1,4 +1,4 @@
-// Structure Tools v0.5 - Auto Structure (Pillars style)
+// Structure Tools v0.6 - Pillars + Enclose styles
 //
 // A small "Auto" button in the Edit tab opens the Structure Tools menu
 // (style, direction, max height, Structure, Show ID).
@@ -29,6 +29,8 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <random>
+#include <set>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -93,6 +95,7 @@ bool has(std::vector<Side> const& v, Side s) {
 
 bool baseLines(int id, std::vector<Side>& out) {
     switch (id) {
+        case 1: out = { Side::Top, Side::Right, Side::Bottom, Side::Left }; return true;
         case 2: out = { Side::Top }; return true;
         case 3: out = { Side::Top, Side::Left }; return true;
         case 5: out = {}; return true;
@@ -206,7 +209,7 @@ struct Pillar {
     std::vector<float> ys;
 };
 
-enum class SrcResult { Ok, Skip, Unknown };
+enum class SrcResult { Ok, Skip, Unknown, NeedsNeighbor };
 
 // Turns one block/slope into zero or more pillar starting points.
 SrcResult makeSources(GameObject* obj, std::string const& setting, std::vector<Source>& out) {
@@ -240,6 +243,7 @@ SrcResult makeSources(GameObject* obj, std::string const& setting, std::vector<S
         bool t = has(lines, Side::Top), b = has(lines, Side::Bottom);
         if (t && !b) dir = -1;
         else if (b && !t) dir = +1;
+        else if (obj->m_objectID == 1) return SrcResult::NeedsNeighbor; // default block: copy the blocks beside it
         else return SrcResult::Skip; // side-only or no lines: no up/down to read
     }
     out.push_back({ px, py + static_cast<float>(dir) * GRID, dir });
@@ -252,9 +256,69 @@ void alert(std::string const& text) {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Enclose style helpers
+// ---------------------------------------------------------------------------
 namespace {
 
-std::vector<std::string> const STYLES = { "Pillars" };
+enum : int { BT = 1, BR = 2, BB = 4, BL = 8 };
+
+int bitOf(Side s) {
+    switch (s) {
+        case Side::Top: return BT;
+        case Side::Right: return BR;
+        case Side::Bottom: return BB;
+        default: return BL;
+    }
+}
+
+struct DirInfo { int dx, dy, bit, opp; };
+constexpr DirInfo DIRS[4] = {
+    { 0, 1, BT, BB }, { 1, 0, BR, BL }, { 0, -1, BB, BT }, { -1, 0, BL, BR }
+};
+
+struct BodyCell { int flat = 0; int open = 0; };
+using CellKey = std::pair<int, int>;
+
+struct Variant { int id; float rot; };
+
+// Block variant (ID + rotation) that has lines on exactly the exposed sides.
+Variant blockForExposure(int mask, bool& partial) {
+    switch (mask) {
+        case 0: return { ID_NONE, 0.f };
+        case BT: return { 2, 0.f };
+        case BR: return { 2, 90.f };
+        case BB: return { 2, 180.f };
+        case BL: return { 2, 270.f };
+        case BT | BL: return { 3, 0.f };
+        case BT | BR: return { 3, 90.f };
+        case BR | BB: return { 3, 180.f };
+        case BB | BL: return { 3, 270.f };
+        case BL | BR: return { 7, 0.f };
+        case BT | BB: return { 7, 90.f };
+        case BT | BL | BR: return { 6, 0.f };
+        case BR | BT | BB: return { 6, 90.f };
+        case BB | BR | BL: return { 6, 180.f };
+        case BL | BB | BT: return { 6, 270.f };
+        default: partial = true; return { 6, 0.f }; // all four edges: no 4-line block known
+    }
+}
+
+// Rotation of a 45 degree slope (unrotated legs: bottom + right) for a given leg pair.
+float slopeRotationForLegs(int legs) {
+    switch (legs) {
+        case BB | BR: return 0.f;
+        case BL | BB: return 90.f;
+        case BT | BL: return 180.f;
+        default: return 270.f; // top + right
+    }
+}
+
+} // namespace
+
+namespace {
+
+std::vector<std::string> const STYLES = { "Pillars", "Enclose" };
 std::vector<std::string> const DIRECTIONS = { "Auto", "Down", "Up" };
 
 std::string cycle(std::vector<std::string> const& list, std::string const& cur, int delta) {
@@ -344,9 +408,10 @@ public:
 
         auto style = Mod::get()->getSettingValue<std::string>("style");
         auto dir = Mod::get()->getSettingValue<std::string>("direction");
-        int rows = static_cast<int>(Mod::get()->getSettingValue<int64_t>("max-rows"));
+        int rows = std::clamp(static_cast<int>(Mod::get()->getSettingValue<int64_t>("max-rows")), 1, 30);
 
-        float y1 = 42.f, y2 = 10.f, y3 = -22.f, y4 = -58.f;
+        // Origin of this menu is the Close button; the box spans about +26 (bottom) to +229 (top).
+        float y1 = 165.f, y2 = 130.f, y3 = 95.f, y4 = 55.f;
 
         addMenuLabel(menu, "Style", -135.f, y1, .5f, true);
         addMenuButton(menu, "<", 10.f, y1, .6f, menu_selector(StructureEditorUI::onStylePrev));
@@ -420,6 +485,196 @@ public:
         }
         auto style = Mod::get()->getSettingValue<std::string>("style");
         if (style == "Pillars") this->runPillars();
+        else if (style == "Enclose") this->runEnclose();
+    }
+
+    // Style 2: close the selected blocks/slopes in with the fewest blocks that give
+    // every exposed edge a line. Convex corners are randomly a block or a 45 degree slope.
+    void runEnclose() {
+        auto lel = m_editorLayer;
+        auto selected = this->getSelectedObjects();
+        if (!selected || selected->count() == 0) {
+            alert("Select the blocks or slopes you want to enclose first.");
+            return;
+        }
+        int chance = static_cast<int>(Mod::get()->getSettingValue<int64_t>("corner-slope-chance"));
+
+        struct Item { float cx, cy; int flat, open; };
+        std::vector<Item> items;
+        int skipped = 0;
+        std::set<int> unknownIds;
+
+        for (auto obj : CCArrayExt<GameObject*>(selected)) {
+            float px = obj->getPositionX(), py = obj->getPositionY();
+            if (obj->m_objectType == GameObjectType::Slope) {
+                SlopeInfo si;
+                if (!slopeInfo(obj, si)) { ++skipped; continue; }
+                int W = si.lens[si.h], H = si.lens[si.v];
+                int hBit = bitOf(si.sides[si.h]), vBit = bitOf(si.sides[si.v]);
+                for (int i = 0; i < W; ++i) {
+                    for (int j = 0; j < H; ++j) {
+                        float cx = px + (static_cast<float>(i) - static_cast<float>(W - 1) / 2.f) * GRID;
+                        float cy = py + (static_cast<float>(j) - static_cast<float>(H - 1) / 2.f) * GRID;
+                        int flat = 0;
+                        if (hBit == BT && j == H - 1) flat |= hBit;
+                        if (hBit == BB && j == 0) flat |= hBit;
+                        if (vBit == BR && i == W - 1) flat |= vBit;
+                        if (vBit == BL && i == 0) flat |= vBit;
+                        items.push_back({ cx, cy, flat, flat });
+                    }
+                }
+            } else if (obj->m_objectType == GameObjectType::Solid) {
+                std::vector<Side> lines;
+                int open = 0;
+                if (baseLines(obj->m_objectID, lines)) {
+                    if (!transformSides(obj, lines)) { ++skipped; continue; }
+                    int lm = 0;
+                    for (auto sd : lines) lm |= bitOf(sd);
+                    open = 15 & ~lm;
+                } else {
+                    unknownIds.insert(obj->m_objectID); // treated as a closed block
+                }
+                items.push_back({ px, py, 15, open });
+            }
+        }
+
+        if (items.empty()) {
+            alert("None of the selected objects are blocks or slopes.");
+            return;
+        }
+
+        // Grid cells relative to the first object, so off-grid layouts keep their sub-grid.
+        float ox = items[0].cx, oy = items[0].cy;
+        std::map<CellKey, BodyCell> body;
+        for (auto& it : items) {
+            float fx = (it.cx - ox) / GRID, fy = (it.cy - oy) / GRID;
+            int ix = static_cast<int>(std::lround(fx)), iy = static_cast<int>(std::lround(fy));
+            if (std::fabs(fx - static_cast<float>(ix)) * GRID > 4.f ||
+                std::fabs(fy - static_cast<float>(iy)) * GRID > 4.f) { ++skipped; continue; }
+            auto& b = body[{ ix, iy }];
+            b.flat |= it.flat;
+            b.open |= it.open;
+        }
+
+        OccupancyIndex index, solidIndex;
+        for (auto obj : CCArrayExt<GameObject*>(lel->m_objects)) {
+            if (isBlocking(obj)) index.add(obj);
+            if (obj->m_objectType == GameObjectType::Solid) solidIndex.add(obj);
+        }
+        auto worldX = [&](int ix) { return ox + static_cast<float>(ix) * GRID; };
+        auto worldY = [&](int iy) { return oy + static_cast<float>(iy) * GRID; };
+
+        // A) Cells to fill: neighbours of open edges, completed to the bounding rectangle.
+        std::set<CellKey> fill;
+        std::set<CellKey> visited;
+        for (auto& [k0, b0] : body) {
+            if (visited.count(k0)) continue;
+            std::vector<CellKey> cluster, stack = { k0 };
+            visited.insert(k0);
+            while (!stack.empty()) {
+                auto c = stack.back();
+                stack.pop_back();
+                cluster.push_back(c);
+                for (auto const& d : DIRS) {
+                    CellKey n = { c.first + d.dx, c.second + d.dy };
+                    if (body.count(n) && !visited.count(n)) { visited.insert(n); stack.push_back(n); }
+                }
+            }
+
+            std::set<CellKey> wanted;
+            for (auto& c : cluster) {
+                int open = body[c].open;
+                for (auto const& d : DIRS) {
+                    if (!(open & d.bit)) continue;
+                    CellKey n = { c.first + d.dx, c.second + d.dy };
+                    if (!body.count(n)) wanted.insert(n);
+                }
+            }
+            if (wanted.empty()) continue;
+
+            int minX = k0.first, maxX = k0.first, minY = k0.second, maxY = k0.second;
+            auto grow = [&](CellKey const& c) {
+                minX = std::min(minX, c.first); maxX = std::max(maxX, c.first);
+                minY = std::min(minY, c.second); maxY = std::max(maxY, c.second);
+            };
+            for (auto& c : cluster) grow(c);
+            for (auto& c : wanted) grow(c);
+
+            for (int x = minX; x <= maxX; ++x) {
+                for (int y = minY; y <= maxY; ++y) {
+                    if (!body.count({ x, y })) fill.insert({ x, y });
+                }
+            }
+            if (fill.size() > 3000) break;
+        }
+
+        // Never build on top of existing objects.
+        for (auto it = fill.begin(); it != fill.end();) {
+            if (index.occupied(worldX(it->first), worldY(it->second))) it = fill.erase(it);
+            else ++it;
+        }
+
+        if (fill.empty()) {
+            Notification::create("Already closed in - nothing to add", NotificationIcon::Warning)->show();
+            return;
+        }
+
+        // B) Pick a block or slope for every cell from the edges that are exposed.
+        std::mt19937 rng{ std::random_device{}() };
+        std::uniform_int_distribution<int> pct(1, 100);
+
+        auto created = CCArray::create();
+        int placed = 0, slopes = 0;
+        bool partial = false;
+        for (auto& c : fill) {
+            int exposed = 0;
+            for (auto const& d : DIRS) {
+                CellKey n = { c.first + d.dx, c.second + d.dy };
+                bool covered = fill.count(n) > 0;
+                if (!covered) {
+                    auto bi = body.find(n);
+                    if (bi != body.end() && (bi->second.flat & d.opp)) covered = true;
+                }
+                if (!covered) covered = solidIndex.occupied(worldX(n.first), worldY(n.second));
+                if (!covered) exposed |= d.bit;
+            }
+
+            int id;
+            float rot = 0.f;
+            bool corner = exposed == (BT | BR) || exposed == (BR | BB) ||
+                          exposed == (BB | BL) || exposed == (BT | BL);
+            if (corner && pct(rng) <= chance) {
+                id = ID_SLOPE45;
+                rot = slopeRotationForLegs(15 & ~exposed); // legs face the neighbours
+                ++slopes;
+            } else {
+                auto v = blockForExposure(exposed, partial);
+                id = v.id;
+                rot = v.rot;
+            }
+
+            auto obj = lel->createObject(id, { worldX(c.first), worldY(c.second) }, true);
+            if (!obj) continue;
+            if (rot != 0.f) obj->setRotation(rot);
+            created->addObject(obj);
+            ++placed;
+        }
+
+        if (created->count() > 0) {
+            lel->addToUndoList(UndoObject::createWithArray(created, UndoCommand::Paste), false);
+        }
+
+        std::string msg = fmt::format("Enclosed with {} blocks ({} slopes)", placed - slopes, slopes);
+        if (skipped > 0) msg += fmt::format(" ({} skipped)", skipped);
+        if (partial) msg += " - a lone cell needs 4 lines, left one open";
+        Notification::create(msg, placed > 0 ? NotificationIcon::Success : NotificationIcon::Warning)->show();
+
+        if (!unknownIds.empty()) {
+            std::string detail = "These selected block IDs aren't in my table, so I treated them as already closed: ";
+            int n = 0;
+            for (int i : unknownIds) { if (n++) detail += ", "; detail += std::to_string(i); if (n >= 12) break; }
+            alert(detail);
+        }
     }
 
     void runPillars() {
@@ -436,6 +691,15 @@ public:
         std::map<std::pair<long, int>, Source> sources;
         int skipped = 0;
         std::set<int> unknownIds;
+        std::vector<GameObject*> pending;
+        std::map<std::pair<long, long>, int> decided;
+        auto addSource = [&](Source const& s) {
+            std::pair<long, int> key = { std::lround(s.x * 2.f), s.dir };
+            auto it = sources.find(key);
+            bool better = it == sources.end() ||
+                (s.dir < 0 ? s.y < it->second.y : s.y > it->second.y);
+            if (better) sources[key] = s;
+        };
         for (auto obj : CCArrayExt<GameObject*>(pool)) {
             bool solid = obj->m_objectType == GameObjectType::Solid;
             bool slope = obj->m_objectType == GameObjectType::Slope;
@@ -443,7 +707,7 @@ public:
 
             int id = obj->m_objectID;
             if (wholeLevel) {
-                bool known = id == 2 || id == 3 || id == 6 ||
+                bool known = id == 1 || id == 2 || id == 3 || id == 6 ||
                              id == ID_SLOPE45 || id == ID_SLOPE2X1;
                 if (!known) {
                     // 5 and 7 are the pillar fillers themselves; everything else is reported.
@@ -456,15 +720,35 @@ public:
             auto res = makeSources(obj, setting, list);
             if (res == SrcResult::Unknown) { unknownIds.insert(id); ++skipped; continue; }
             if (res == SrcResult::Skip) { ++skipped; continue; }
+            if (res == SrcResult::NeedsNeighbor) { pending.push_back(obj); continue; }
 
-            for (auto& s : list) {
-                std::pair<long, int> key = { std::lround(s.x * 2.f), s.dir };
-                auto it = sources.find(key);
-                bool better = it == sources.end() ||
-                    (s.dir < 0 ? s.y < it->second.y : s.y > it->second.y);
-                if (better) sources[key] = s;
+            if (obj->m_objectType == GameObjectType::Solid && !list.empty()) {
+                decided[{ std::lround(obj->getPositionX() * 2.f), std::lround(obj->getPositionY() * 2.f) }] = list[0].dir;
             }
+            for (auto& s : list) addSource(s);
         }
+
+        // Default blocks (ID 1) have lines on every side, so copy the direction of the
+        // decided block directly beside them. Repeat so a row of them can chain.
+        for (int pass = 0; pass < 4 && !pending.empty(); ++pass) {
+            std::vector<GameObject*> still;
+            for (auto obj : pending) {
+                long px2 = std::lround(obj->getPositionX() * 2.f);
+                long py2 = std::lround(obj->getPositionY() * 2.f);
+                int dir = 0;
+                for (long dx : { -60L, 60L }) {
+                    auto it = decided.find({ px2 + dx, py2 });
+                    if (it != decided.end()) { dir = it->second; break; }
+                }
+                if (dir == 0) { still.push_back(obj); continue; }
+                decided[{ px2, py2 }] = dir;
+                addSource({ obj->getPositionX(),
+                            obj->getPositionY() + static_cast<float>(dir) * GRID, dir });
+            }
+            if (still.size() == pending.size()) break;
+            pending = std::move(still);
+        }
+        skipped += static_cast<int>(pending.size());
 
         if (sources.empty()) {
             std::string msg =
