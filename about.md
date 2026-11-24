@@ -2,12 +2,13 @@
 
 Editor tools that build level structure for you.
 
-## Pillars
+## Auto
 
-Open the **Edit** tab. Three small buttons sit in the empty slots on the bottom row:
+Open the **Edit** tab and press **Auto**.
 
-- **Down**: select platform blocks (1x1 blocks or 45° slopes), press Down. A pillar grows under each column.
-- **Up**: same, but the pillar grows upward from the top of each column (for upside-down structures).
-- **Pick**: select exactly one block and press Pick to choose which block pillars are made from. Choose the variant with lines on the sides only.
+- Nothing selected: the whole level is scanned.
+- Something selected: only the selection is structured.
 
-Pillars stop after *Max Pillar Height* blocks (default 5), at the ground (Down only), or at the first object in the way. Ctrl+Z undoes a whole fill in one step.
+**Style: Pillars.** Each platform gets a pillar with the correct line blocks. Wide platforms get line blocks on the outer sides and a plain filler block in the middle. The direction is read from the lines on each block: a top line grows the pillar down, a bottom line grows it up.
+
+Pillars stop after *Max Pillar Height* blocks (default 5), at the ground (down only), or at the first object in the way. Ctrl+Z undoes a whole run in one step.
