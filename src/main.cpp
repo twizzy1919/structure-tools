@@ -1,4 +1,4 @@
-// Structure Tools v0.6 - Pillars + Enclose styles
+// Structure Tools v0.7 - Pillars + Enclose styles
 //
 // A small "Auto" button in the Edit tab opens the Structure Tools menu
 // (style, direction, max height, Structure, Show ID).
@@ -314,6 +314,14 @@ float slopeRotationForLegs(int legs) {
     }
 }
 
+// Which 3-unit step of the 30-unit grid a coordinate sits on (0..9), so structures on
+// different (off-grid) sub-grids are processed separately.
+int subgrid(float v) {
+    float r = std::fmod(v, GRID);
+    if (r < 0.f) r += GRID;
+    return static_cast<int>(std::floor((r + 1.5f) / 3.f)) % 10;
+}
+
 } // namespace
 
 namespace {
@@ -488,25 +496,27 @@ public:
         else if (style == "Enclose") this->runEnclose();
     }
 
-    // Style 2: close the selected blocks/slopes in with the fewest blocks that give
-    // every exposed edge a line. Convex corners are randomly a block or a 45 degree slope.
+    // Style 2: close blocks/slopes in with the fewest blocks that give every exposed edge
+    // a line. Selection = only the selection; nothing selected = the whole level.
+    // Touching structures merge into one; one-cell gaps between structures are filled.
     void runEnclose() {
         auto lel = m_editorLayer;
         auto selected = this->getSelectedObjects();
-        if (!selected || selected->count() == 0) {
-            alert("Select the blocks or slopes you want to enclose first.");
-            return;
-        }
+        bool wholeLevel = !selected || selected->count() == 0;
+        CCArray* pool = wholeLevel ? lel->m_objects : selected;
         int chance = static_cast<int>(Mod::get()->getSettingValue<int64_t>("corner-slope-chance"));
 
-        struct Item { float cx, cy; int flat, open; };
+        struct Item { float cx, cy; int flat, open; GameObject* block; int lines; };
         std::vector<Item> items;
         int skipped = 0;
         std::set<int> unknownIds;
 
-        for (auto obj : CCArrayExt<GameObject*>(selected)) {
+        for (auto obj : CCArrayExt<GameObject*>(pool)) {
+            int id = obj->m_objectID;
             float px = obj->getPositionX(), py = obj->getPositionY();
+
             if (obj->m_objectType == GameObjectType::Slope) {
+                if (wholeLevel && id != ID_SLOPE45 && id != ID_SLOPE2X1) continue;
                 SlopeInfo si;
                 if (!slopeInfo(obj, si)) { ++skipped; continue; }
                 int W = si.lens[si.h], H = si.lens[si.v];
@@ -520,157 +530,232 @@ public:
                         if (hBit == BB && j == 0) flat |= hBit;
                         if (vBit == BR && i == W - 1) flat |= vBit;
                         if (vBit == BL && i == 0) flat |= vBit;
-                        items.push_back({ cx, cy, flat, flat });
+                        items.push_back({ cx, cy, flat, flat, nullptr, 0 });
                     }
                 }
             } else if (obj->m_objectType == GameObjectType::Solid) {
-                std::vector<Side> lines;
-                int open = 0;
-                if (baseLines(obj->m_objectID, lines)) {
-                    if (!transformSides(obj, lines)) { ++skipped; continue; }
-                    int lm = 0;
-                    for (auto sd : lines) lm |= bitOf(sd);
-                    open = 15 & ~lm;
-                } else {
-                    unknownIds.insert(obj->m_objectID); // treated as a closed block
+                if (wholeLevel && !(id == 1 || id == 2 || id == 3 || id == 6)) {
+                    // 5 and 7 are pillar fillers; anything else is reported.
+                    if (id != ID_NONE && id != ID_SIDES) unknownIds.insert(id);
+                    continue;
                 }
-                items.push_back({ px, py, 15, open });
+                std::vector<Side> lines;
+                int open = 0, lm = 15;
+                GameObject* block = nullptr;
+                if (baseLines(id, lines)) {
+                    if (!transformSides(obj, lines)) { ++skipped; continue; }
+                    lm = 0;
+                    for (auto sd : lines) lm |= bitOf(sd);
+                    // Blocks with no top or bottom line are pillar pieces or walls: leave alone.
+                    if (wholeLevel && !(lm & (BT | BB))) continue;
+                    open = 15 & ~lm;
+                    if (id != 1) block = obj; // pattern blocks can be swapped to fix seams
+                } else {
+                    unknownIds.insert(id); // treated as a closed block
+                }
+                items.push_back({ px, py, 15, open, block, lm });
             }
         }
 
         if (items.empty()) {
-            alert("None of the selected objects are blocks or slopes.");
+            alert("No blocks or slopes found to enclose.");
             return;
         }
 
-        // Grid cells relative to the first object, so off-grid layouts keep their sub-grid.
-        float ox = items[0].cx, oy = items[0].cy;
-        std::map<CellKey, BodyCell> body;
-        for (auto& it : items) {
-            float fx = (it.cx - ox) / GRID, fy = (it.cy - oy) / GRID;
-            int ix = static_cast<int>(std::lround(fx)), iy = static_cast<int>(std::lround(fy));
-            if (std::fabs(fx - static_cast<float>(ix)) * GRID > 4.f ||
-                std::fabs(fy - static_cast<float>(iy)) * GRID > 4.f) { ++skipped; continue; }
-            auto& b = body[{ ix, iy }];
-            b.flat |= it.flat;
-            b.open |= it.open;
-        }
+        std::map<std::pair<int, int>, std::vector<Item>> groups;
+        for (auto& it : items) groups[{ subgrid(it.cx), subgrid(it.cy) }].push_back(it);
 
         OccupancyIndex index, solidIndex;
         for (auto obj : CCArrayExt<GameObject*>(lel->m_objects)) {
             if (isBlocking(obj)) index.add(obj);
             if (obj->m_objectType == GameObjectType::Solid) solidIndex.add(obj);
         }
-        auto worldX = [&](int ix) { return ox + static_cast<float>(ix) * GRID; };
-        auto worldY = [&](int iy) { return oy + static_cast<float>(iy) * GRID; };
 
-        // A) Cells to fill: neighbours of open edges, completed to the bounding rectangle.
-        std::set<CellKey> fill;
-        std::set<CellKey> visited;
-        for (auto& [k0, b0] : body) {
-            if (visited.count(k0)) continue;
-            std::vector<CellKey> cluster, stack = { k0 };
-            visited.insert(k0);
-            while (!stack.empty()) {
-                auto c = stack.back();
-                stack.pop_back();
-                cluster.push_back(c);
-                for (auto const& d : DIRS) {
-                    CellKey n = { c.first + d.dx, c.second + d.dy };
-                    if (body.count(n) && !visited.count(n)) { visited.insert(n); stack.push_back(n); }
+        struct Body { int flat = 0; int open = 0; GameObject* block = nullptr; int lines = 0; };
+
+        auto created = CCArray::create();
+        auto removed = CCArray::create();
+        int placed = 0, slopes = 0, fixedLines = 0;
+        bool partial = false;
+        std::mt19937 rng{ std::random_device{}() };
+        std::uniform_int_distribution<int> pct(1, 100);
+
+        for (auto& gkv : groups) {
+            auto& group = gkv.second;
+            float ox = group[0].cx, oy = group[0].cy;
+            auto worldX = [&](int ix) { return ox + static_cast<float>(ix) * GRID; };
+            auto worldY = [&](int iy) { return oy + static_cast<float>(iy) * GRID; };
+
+            std::map<CellKey, Body> body;
+            for (auto& it : group) {
+                float fx = (it.cx - ox) / GRID, fy = (it.cy - oy) / GRID;
+                int ix = static_cast<int>(std::lround(fx)), iy = static_cast<int>(std::lround(fy));
+                if (std::fabs(fx - static_cast<float>(ix)) * GRID > 4.f ||
+                    std::fabs(fy - static_cast<float>(iy)) * GRID > 4.f) { ++skipped; continue; }
+                auto& b = body[{ ix, iy }];
+                b.flat |= it.flat;
+                b.open |= it.open;
+                if (it.block) { b.block = it.block; b.lines = it.lines; }
+            }
+
+            // A) Cells to fill: neighbours of open edges, completed to the bounding rectangle
+            //    (small structures only) so the result is a clean medium-sized shape.
+            std::set<CellKey> fill;
+            std::set<CellKey> visited;
+            for (auto const& kv : body) {
+                CellKey k0 = kv.first;
+                if (visited.count(k0)) continue;
+                std::vector<CellKey> cluster, stack = { k0 };
+                visited.insert(k0);
+                while (!stack.empty()) {
+                    auto c = stack.back();
+                    stack.pop_back();
+                    cluster.push_back(c);
+                    for (auto const& d : DIRS) {
+                        CellKey n = { c.first + d.dx, c.second + d.dy };
+                        if (body.count(n) && !visited.count(n)) { visited.insert(n); stack.push_back(n); }
+                    }
+                }
+
+                std::set<CellKey> wanted;
+                for (auto& c : cluster) {
+                    int open = body[c].open;
+                    for (auto const& d : DIRS) {
+                        if (!(open & d.bit)) continue;
+                        CellKey n = { c.first + d.dx, c.second + d.dy };
+                        if (body.count(n)) continue;
+                        if (index.occupied(worldX(n.first), worldY(n.second))) continue; // already built
+                        wanted.insert(n);
+                    }
+                }
+                if (wanted.empty()) continue;
+
+                int minX = k0.first, maxX = k0.first, minY = k0.second, maxY = k0.second;
+                auto grow = [&](CellKey const& c) {
+                    minX = std::min(minX, c.first); maxX = std::max(maxX, c.first);
+                    minY = std::min(minY, c.second); maxY = std::max(maxY, c.second);
+                };
+                for (auto& c : cluster) grow(c);
+                for (auto& c : wanted) grow(c);
+
+                if ((maxX - minX + 1) * (maxY - minY + 1) <= 64) {
+                    for (int x = minX; x <= maxX; ++x) {
+                        for (int y = minY; y <= maxY; ++y) {
+                            if (!body.count({ x, y })) fill.insert({ x, y });
+                        }
+                    }
+                } else {
+                    for (auto& c : wanted) fill.insert(c);
                 }
             }
 
-            std::set<CellKey> wanted;
-            for (auto& c : cluster) {
-                int open = body[c].open;
-                for (auto const& d : DIRS) {
-                    if (!(open & d.bit)) continue;
-                    CellKey n = { c.first + d.dx, c.second + d.dy };
-                    if (!body.count(n)) wanted.insert(n);
+            // Fill one-cell gaps between structures that are almost touching.
+            {
+                std::set<CellKey> foot;
+                for (auto const& kv : body) foot.insert(kv.first);
+                for (auto& c : fill) foot.insert(c);
+                std::vector<CellKey> gaps;
+                for (auto& f : foot) {
+                    for (auto const& d : DIRS) {
+                        CellKey mid = { f.first + d.dx, f.second + d.dy };
+                        CellKey far = { f.first + 2 * d.dx, f.second + 2 * d.dy };
+                        if (!foot.count(mid) && foot.count(far)) gaps.push_back(mid);
+                    }
                 }
+                for (auto& g : gaps) fill.insert(g);
             }
-            if (wanted.empty()) continue;
 
-            int minX = k0.first, maxX = k0.first, minY = k0.second, maxY = k0.second;
-            auto grow = [&](CellKey const& c) {
-                minX = std::min(minX, c.first); maxX = std::max(maxX, c.first);
-                minY = std::min(minY, c.second); maxY = std::max(maxY, c.second);
+            // Never build on top of existing objects.
+            for (auto it = fill.begin(); it != fill.end();) {
+                if (index.occupied(worldX(it->first), worldY(it->second))) it = fill.erase(it);
+                else ++it;
+            }
+            if (fill.empty() || fill.size() > 6000) { if (!fill.empty()) ++skipped; continue; }
+
+            // Which edges of a cell are still exposed once everything is placed.
+            auto exposureOf = [&](CellKey const& c) {
+                int e = 0;
+                for (auto const& d : DIRS) {
+                    CellKey n = { c.first + d.dx, c.second + d.dy };
+                    bool covered = fill.count(n) > 0;
+                    if (!covered) {
+                        auto bi = body.find(n);
+                        if (bi != body.end() && (bi->second.flat & d.opp)) covered = true;
+                    }
+                    if (!covered) covered = solidIndex.occupied(worldX(n.first), worldY(n.second));
+                    if (!covered) e |= d.bit;
+                }
+                return e;
             };
-            for (auto& c : cluster) grow(c);
-            for (auto& c : wanted) grow(c);
 
-            for (int x = minX; x <= maxX; ++x) {
-                for (int y = minY; y <= maxY; ++y) {
-                    if (!body.count({ x, y })) fill.insert({ x, y });
+            // B) New blocks / corner slopes.
+            for (auto& c : fill) {
+                int exposed = exposureOf(c);
+                int id;
+                float rot = 0.f;
+                bool corner = exposed == (BT | BR) || exposed == (BR | BB) ||
+                              exposed == (BB | BL) || exposed == (BT | BL);
+                if (corner && pct(rng) <= chance) {
+                    id = ID_SLOPE45;
+                    rot = slopeRotationForLegs(15 & ~exposed); // legs face the neighbours
+                    ++slopes;
+                } else {
+                    auto v = blockForExposure(exposed, partial);
+                    id = v.id;
+                    rot = v.rot;
                 }
+                auto obj = lel->createObject(id, { worldX(c.first), worldY(c.second) }, true);
+                if (!obj) continue;
+                if (rot != 0.f) obj->setRotation(rot);
+                created->addObject(obj);
+                ++placed;
             }
-            if (fill.size() > 3000) break;
+
+            // C) Existing blocks that now touch new blocks may have a line that became a
+            //    seam: swap them for the variant with the right lines.
+            for (auto& kv : body) {
+                auto& b = kv.second;
+                if (!b.block) continue;
+                bool nextToFill = false;
+                for (auto const& d : DIRS) {
+                    if (fill.count({ kv.first.first + d.dx, kv.first.second + d.dy })) nextToFill = true;
+                }
+                if (!nextToFill) continue;
+                int e = exposureOf(kv.first);
+                if (e == b.lines) continue;
+                bool p = false;
+                auto v = blockForExposure(e, p);
+                if (p) continue;
+                auto nb = lel->createObject(v.id, { b.block->getPositionX(), b.block->getPositionY() }, true);
+                if (!nb) continue;
+                if (v.rot != 0.f) nb->setRotation(v.rot);
+                created->addObject(nb);
+                removed->addObject(b.block);
+                ++fixedLines;
+            }
         }
 
-        // Never build on top of existing objects.
-        for (auto it = fill.begin(); it != fill.end();) {
-            if (index.occupied(worldX(it->first), worldY(it->second))) it = fill.erase(it);
-            else ++it;
-        }
-
-        if (fill.empty()) {
+        if (created->count() == 0) {
             Notification::create("Already closed in - nothing to add", NotificationIcon::Warning)->show();
             return;
         }
 
-        // B) Pick a block or slope for every cell from the edges that are exposed.
-        std::mt19937 rng{ std::random_device{}() };
-        std::uniform_int_distribution<int> pct(1, 100);
-
-        auto created = CCArray::create();
-        int placed = 0, slopes = 0;
-        bool partial = false;
-        for (auto& c : fill) {
-            int exposed = 0;
-            for (auto const& d : DIRS) {
-                CellKey n = { c.first + d.dx, c.second + d.dy };
-                bool covered = fill.count(n) > 0;
-                if (!covered) {
-                    auto bi = body.find(n);
-                    if (bi != body.end() && (bi->second.flat & d.opp)) covered = true;
-                }
-                if (!covered) covered = solidIndex.occupied(worldX(n.first), worldY(n.second));
-                if (!covered) exposed |= d.bit;
-            }
-
-            int id;
-            float rot = 0.f;
-            bool corner = exposed == (BT | BR) || exposed == (BR | BB) ||
-                          exposed == (BB | BL) || exposed == (BT | BL);
-            if (corner && pct(rng) <= chance) {
-                id = ID_SLOPE45;
-                rot = slopeRotationForLegs(15 & ~exposed); // legs face the neighbours
-                ++slopes;
-            } else {
-                auto v = blockForExposure(exposed, partial);
-                id = v.id;
-                rot = v.rot;
-            }
-
-            auto obj = lel->createObject(id, { worldX(c.first), worldY(c.second) }, true);
-            if (!obj) continue;
-            if (rot != 0.f) obj->setRotation(rot);
-            created->addObject(obj);
-            ++placed;
-        }
-
-        if (created->count() > 0) {
-            lel->addToUndoList(UndoObject::createWithArray(created, UndoCommand::Paste), false);
+        // Undo: the new blocks are one step, swapped blocks are a second step.
+        lel->addToUndoList(UndoObject::createWithArray(created, UndoCommand::Paste), false);
+        if (removed->count() > 0) {
+            lel->addToUndoList(UndoObject::createWithArray(removed, UndoCommand::Delete), false);
+            if (!wholeLevel) this->deselectAll();
+            for (auto obj : CCArrayExt<GameObject*>(removed)) lel->removeObject(obj, true);
         }
 
         std::string msg = fmt::format("Enclosed with {} blocks ({} slopes)", placed - slopes, slopes);
+        if (fixedLines > 0) msg += fmt::format(", fixed {} lines (Ctrl+Z twice)", fixedLines);
         if (skipped > 0) msg += fmt::format(" ({} skipped)", skipped);
         if (partial) msg += " - a lone cell needs 4 lines, left one open";
-        Notification::create(msg, placed > 0 ? NotificationIcon::Success : NotificationIcon::Warning)->show();
+        Notification::create(msg, NotificationIcon::Success)->show();
 
         if (!unknownIds.empty()) {
-            std::string detail = "These selected block IDs aren't in my table, so I treated them as already closed: ";
+            std::string detail = "These block IDs aren't in my table, so I treated them as already closed: ";
             int n = 0;
             for (int i : unknownIds) { if (n++) detail += ", "; detail += std::to_string(i); if (n >= 12) break; }
             alert(detail);
