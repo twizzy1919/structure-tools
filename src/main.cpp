@@ -1,8 +1,11 @@
-// Structure Tools v0.4 - Auto Structure (Pillars style)
+// Structure Tools v0.5 - Auto Structure (Pillars style)
 //
-// One "Auto" button in the Edit tab:
+// A small "Auto" button in the Edit tab opens the Structure Tools menu
+// (style, direction, max height, Structure, Show ID).
 //   - objects selected  -> only the selection is structured
 //   - nothing selected  -> the whole level is scanned
+// Pillar edge lines are hidden where a pillar cell touches an existing solid block or a
+// slope whose flat side faces it.
 //
 // Direction (Direction setting = Auto):
 //   Blocks: line on TOP (none on bottom) -> pillar grows DOWN; line on BOTTOM -> grows UP.
@@ -128,6 +131,69 @@ struct OccupancyIndex {
     }
 };
 
+// Geometry of a slope after flips/rotation. sides[0]/lens[0] = the unrotated Bottom leg
+// (2 cells long on the 2x1 slope), sides[1]/lens[1] = the unrotated Right leg (1 cell).
+struct SlopeInfo {
+    std::vector<Side> sides;
+    int lens[2] = { 1, 1 };
+    int h = 0; // index of the horizontal leg
+    int v = 1; // index of the vertical leg
+};
+
+bool slopeInfo(GameObject* obj, SlopeInfo& si) {
+    si.sides = { Side::Bottom, Side::Right };
+    si.lens[0] = obj->m_objectID == ID_SLOPE2X1 ? 2 : 1;
+    si.lens[1] = 1;
+    if (!transformSides(obj, si.sides)) return false;
+    si.h = (si.sides[0] == Side::Top || si.sides[0] == Side::Bottom) ? 0 : 1;
+    si.v = 1 - si.h;
+    return true;
+}
+
+// Existing solid things next to a pillar cell hide that cell's edge line.
+struct NeighborIndex {
+    struct Item { float x, y, hx, hy; bool leftFlat, rightFlat; };
+    std::unordered_map<int, std::vector<Item>> columns;
+
+    static int key(float x) { return static_cast<int>(std::floor(x / GRID)); }
+
+    void add(GameObject* obj) {
+        Item it{};
+        it.x = obj->getPositionX();
+        it.y = obj->getPositionY();
+        if (obj->m_objectType == GameObjectType::Solid) {
+            it.hx = it.hy = GRID / 2.f;
+            it.leftFlat = it.rightFlat = true;
+        } else if (obj->m_objectType == GameObjectType::Slope) {
+            SlopeInfo si;
+            if (!slopeInfo(obj, si)) return;
+            it.hx = static_cast<float>(si.lens[si.h]) * GRID / 2.f;
+            it.hy = static_cast<float>(si.lens[si.v]) * GRID / 2.f;
+            it.leftFlat = has(si.sides, Side::Left);
+            it.rightFlat = has(si.sides, Side::Right);
+        } else {
+            return;
+        }
+        columns[key(it.x)].push_back(it);
+    }
+
+    // Is the cell centred at (x, y) covered by something whose facing side is flat?
+    // needRightFlat = the thing is to the LEFT of our cell, so its right side faces us.
+    bool covered(float x, float y, bool needRightFlat) const {
+        int k = key(x);
+        for (int c = k - 2; c <= k + 2; ++c) {
+            auto f = columns.find(c);
+            if (f == columns.end()) continue;
+            for (auto const& it : f->second) {
+                if (std::fabs(it.x - x) <= it.hx - GRID / 2.f + 3.f &&
+                    std::fabs(it.y - y) <= it.hy - GRID / 2.f + 3.f &&
+                    (needRightFlat ? it.rightFlat : it.leftFlat)) return true;
+            }
+        }
+        return false;
+    }
+};
+
 // A pillar starting point. y = centre of the FIRST cell to place, dir = -1 down / +1 up.
 struct Source {
     float x = 0.f;
@@ -149,20 +215,16 @@ SrcResult makeSources(GameObject* obj, std::string const& setting, std::vector<S
     float py = obj->getPositionY();
 
     if (obj->m_objectType == GameObjectType::Slope) {
-        // Unrotated slope: flat legs are Bottom (long leg on the 2x1) and Right (1 cell).
-        std::vector<Side> sides = { Side::Bottom, Side::Right };
-        int lens[2] = { obj->m_objectID == ID_SLOPE2X1 ? 2 : 1, 1 };
-        if (!transformSides(obj, sides)) return SrcResult::Skip;
+        SlopeInfo si;
+        if (!slopeInfo(obj, si)) return SrcResult::Skip;
 
-        int h = (sides[0] == Side::Top || sides[0] == Side::Bottom) ? 0 : 1; // horizontal leg
-        int v = 1 - h;                                                         // vertical leg
-        int dir = sides[h] == Side::Bottom ? -1 : +1;
+        int dir = si.sides[si.h] == Side::Bottom ? -1 : +1;
         if (forced != 0 && forced != dir) return SrcResult::Skip;
 
         // The vertical leg is the slope's height. First cell sits half a cell past its edge.
-        float halfHeight = static_cast<float>(lens[v]) * GRID / 2.f;
+        float halfHeight = static_cast<float>(si.lens[si.v]) * GRID / 2.f;
         float yFirst = py + static_cast<float>(dir) * (halfHeight + GRID / 2.f);
-        int cols = lens[h];
+        int cols = si.lens[si.h];
         for (int i = 0; i < cols; ++i) {
             float x = px + (static_cast<float>(i) - static_cast<float>(cols - 1) / 2.f) * GRID;
             out.push_back({ x, yFirst, dir });
@@ -190,8 +252,32 @@ void alert(std::string const& text) {
 
 } // namespace
 
+namespace {
+
+std::vector<std::string> const STYLES = { "Pillars" };
+std::vector<std::string> const DIRECTIONS = { "Auto", "Down", "Up" };
+
+std::string cycle(std::vector<std::string> const& list, std::string const& cur, int delta) {
+    int idx = 0;
+    for (int i = 0; i < static_cast<int>(list.size()); ++i) {
+        if (list[i] == cur) idx = i;
+    }
+    int n = static_cast<int>(list.size());
+    idx = ((idx + delta) % n + n) % n;
+    return list[idx];
+}
+
+} // namespace
+
 class $modify(StructureEditorUI, EditorUI) {
 public:
+    struct Fields {
+        FLAlertLayer* panel = nullptr;
+        CCLabelBMFont* styleLabel = nullptr;
+        CCLabelBMFont* dirLabel = nullptr;
+        CCLabelBMFont* rowsLabel = nullptr;
+    };
+
     bool init(LevelEditorLayer* editorLayer) {
         if (!EditorUI::init(editorLayer)) return false;
 
@@ -203,13 +289,14 @@ public:
         menu->setID("structure-tools-menu"_spr);
         menu->setPosition({ winSize.width / 2.f + offX, 19.f + offY });
 
+        // One small button in the first empty slot (same size as the other Edit buttons).
         auto spr = ButtonSprite::create("Auto", "bigFont.fnt", "GJ_button_04.png", .6f);
         float w = std::max(1.f, spr->getContentSize().width * spr->getScale());
-        spr->setScale(spr->getScale() * std::min(1.f, 80.f / w));
+        spr->setScale(spr->getScale() * std::min(1.f, 38.f / w));
         auto btn = CCMenuItemSpriteExtra::create(
-            spr, this, menu_selector(StructureEditorUI::onAutoStructure)
+            spr, this, menu_selector(StructureEditorUI::onOpenMenu)
         );
-        btn->setPosition({ 86.f, 0.f });
+        btn->setPosition({ 42.f, 0.f });
         menu->addChild(btn);
         this->addChild(menu, 100);
 
@@ -226,7 +313,111 @@ public:
         menu->setVisible(show);
     }
 
-    void onAutoStructure(CCObject*) {
+    // ---- menu -----------------------------------------------------------------
+
+    CCLabelBMFont* addMenuLabel(CCNode* parent, char const* text, float x, float y, float scale, bool leftAlign) {
+        auto label = CCLabelBMFont::create(text, "bigFont.fnt");
+        label->setScale(scale);
+        if (leftAlign) label->setAnchorPoint({ 0.f, 0.5f });
+        label->setPosition({ x, y });
+        parent->addChild(label);
+        return label;
+    }
+
+    void addMenuButton(CCNode* parent, char const* text, float x, float y, float scale, SEL_MenuHandler handler) {
+        auto spr = ButtonSprite::create(text, "bigFont.fnt", "GJ_button_04.png", .6f);
+        spr->setScale(scale);
+        auto btn = CCMenuItemSpriteExtra::create(spr, this, handler);
+        btn->setPosition({ x, y });
+        parent->addChild(btn);
+    }
+
+    void onOpenMenu(CCObject*) {
+        // Blank lines give the popup room for the controls.
+        auto alert = FLAlertLayer::create(
+            nullptr, "Structure Tools", " \n \n \n \n \n \n \n \n", "Close", nullptr, 320.f
+        );
+        auto menu = alert->m_buttonMenu; // origin = screen centre
+        if (!menu) { alert->show(); return; }
+
+        m_fields->panel = alert;
+
+        auto style = Mod::get()->getSettingValue<std::string>("style");
+        auto dir = Mod::get()->getSettingValue<std::string>("direction");
+        int rows = static_cast<int>(Mod::get()->getSettingValue<int64_t>("max-rows"));
+
+        float y1 = 42.f, y2 = 10.f, y3 = -22.f, y4 = -58.f;
+
+        addMenuLabel(menu, "Style", -135.f, y1, .5f, true);
+        addMenuButton(menu, "<", 10.f, y1, .6f, menu_selector(StructureEditorUI::onStylePrev));
+        m_fields->styleLabel = addMenuLabel(menu, style.c_str(), 70.f, y1, .5f, false);
+        addMenuButton(menu, ">", 130.f, y1, .6f, menu_selector(StructureEditorUI::onStyleNext));
+
+        addMenuLabel(menu, "Direction", -135.f, y2, .5f, true);
+        addMenuButton(menu, "<", 10.f, y2, .6f, menu_selector(StructureEditorUI::onDirPrev));
+        m_fields->dirLabel = addMenuLabel(menu, dir.c_str(), 70.f, y2, .5f, false);
+        addMenuButton(menu, ">", 130.f, y2, .6f, menu_selector(StructureEditorUI::onDirNext));
+
+        addMenuLabel(menu, "Max height", -135.f, y3, .5f, true);
+        addMenuButton(menu, "-", 10.f, y3, .6f, menu_selector(StructureEditorUI::onRowsMinus));
+        m_fields->rowsLabel = addMenuLabel(menu, std::to_string(rows).c_str(), 70.f, y3, .5f, false);
+        addMenuButton(menu, "+", 130.f, y3, .6f, menu_selector(StructureEditorUI::onRowsPlus));
+
+        addMenuButton(menu, "Structure", -60.f, y4, .8f, menu_selector(StructureEditorUI::onRunFromMenu));
+        addMenuButton(menu, "Show ID", 70.f, y4, .8f, menu_selector(StructureEditorUI::onShowId));
+
+        alert->show();
+    }
+
+    void onStylePrev(CCObject*) { this->changeStyle(-1); }
+    void onStyleNext(CCObject*) { this->changeStyle(+1); }
+    void changeStyle(int delta) {
+        auto v = cycle(STYLES, Mod::get()->getSettingValue<std::string>("style"), delta);
+        Mod::get()->setSettingValue<std::string>("style", v);
+        if (m_fields->styleLabel) m_fields->styleLabel->setString(v.c_str());
+    }
+
+    void onDirPrev(CCObject*) { this->changeDir(-1); }
+    void onDirNext(CCObject*) { this->changeDir(+1); }
+    void changeDir(int delta) {
+        auto v = cycle(DIRECTIONS, Mod::get()->getSettingValue<std::string>("direction"), delta);
+        Mod::get()->setSettingValue<std::string>("direction", v);
+        if (m_fields->dirLabel) m_fields->dirLabel->setString(v.c_str());
+    }
+
+    void onRowsMinus(CCObject*) { this->changeRows(-1); }
+    void onRowsPlus(CCObject*) { this->changeRows(+1); }
+    void changeRows(int delta) {
+        int rows = static_cast<int>(Mod::get()->getSettingValue<int64_t>("max-rows")) + delta;
+        rows = std::clamp(rows, 1, 30);
+        Mod::get()->setSettingValue<int64_t>("max-rows", rows);
+        if (m_fields->rowsLabel) m_fields->rowsLabel->setString(std::to_string(rows).c_str());
+    }
+
+    void onShowId(CCObject*) {
+        auto selected = this->getSelectedObjects();
+        if (!selected || selected->count() == 0) {
+            Notification::create("Select a block first", NotificationIcon::Warning)->show();
+            return;
+        }
+        std::map<int, int> counts;
+        for (auto obj : CCArrayExt<GameObject*>(selected)) ++counts[obj->m_objectID];
+        std::string msg = "Selected IDs: ";
+        int n = 0;
+        for (auto& [id, c] : counts) {
+            if (n++) msg += ", ";
+            msg += std::to_string(id);
+            if (c > 1) msg += fmt::format(" (x{})", c);
+            if (n >= 10) break;
+        }
+        Notification::create(msg, NotificationIcon::Success)->show();
+    }
+
+    void onRunFromMenu(CCObject*) {
+        if (m_fields->panel) {
+            m_fields->panel->keyBackClicked(); // closes the popup
+            m_fields->panel = nullptr;
+        }
         auto style = Mod::get()->getSettingValue<std::string>("style");
         if (style == "Pillars") this->runPillars();
     }
@@ -295,6 +486,9 @@ public:
             if (isBlocking(obj)) index.add(obj);
         }
 
+        NeighborIndex nbr;
+        for (auto obj : CCArrayExt<GameObject*>(lel->m_objects)) nbr.add(obj);
+
         // 3) Plan every pillar first so neighbours are known before variants are chosen.
         std::vector<Pillar> pillars;
         int total = 0;
@@ -342,8 +536,8 @@ public:
         int placed = 0;
         for (auto& p : pillars) {
             for (float y : p.ys) {
-                bool left = hasCell(p.x - GRID, y);
-                bool right = hasCell(p.x + GRID, y);
+                bool left = hasCell(p.x - GRID, y) || nbr.covered(p.x - GRID, y, true);
+                bool right = hasCell(p.x + GRID, y) || nbr.covered(p.x + GRID, y, false);
 
                 int id;
                 float rot = 0.f;
