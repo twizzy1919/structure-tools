@@ -5,7 +5,7 @@
 	},
 	"id": "twizzymik.structure-tools",
 	"name": "Structure Tools",
-	"version": "v0.3.0",
+	"version": "v0.4.0",
 	"developer": "twizzymik",
 	"description": "Auto-builds level structure in the editor. Pillars so far.",
 	"tags": ["editor", "utility"],
