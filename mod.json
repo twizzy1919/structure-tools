@@ -5,9 +5,9 @@
 	},
 	"id": "twizzymik.structure-tools",
 	"name": "Structure Tools",
-	"version": "v0.8.0",
+	"version": "v0.9.0",
 	"developer": "twizzymik",
-	"description": "Auto-builds level structure in the editor: pillars, enclosures and chamfered shapes.",
+	"description": "Auto-builds level structure in the editor: pillars, enclosures and terrain-connected pillars.",
 	"tags": [
 		"editor",
 		"utility"
@@ -16,12 +16,12 @@
 		"style": {
 			"type": "string",
 			"name": "Style",
-			"description": "Structuring style used by the menu. Pillars grows pillars from platforms. Enclose closes blocks/slopes in with the fewest blocks. Shapes builds a chamfered blob around each group of blocks/slopes.",
+			"description": "Structuring style used by the menu. Pillars grows short pillars from platforms. Enclose closes blocks/slopes in with the fewest blocks. Terrain grows pillars until they reach the black thorn terrain (IDs 1716-1718), or the ground.",
 			"default": "Pillars",
 			"one-of": [
 				"Pillars",
 				"Enclose",
-				"Shapes"
+				"Terrain"
 			]
 		},
 		"direction": {
@@ -43,6 +43,20 @@
 			"min": 1,
 			"max": 30
 		},
+		"terrain-max-length": {
+			"type": "int",
+			"name": "Terrain Max Length",
+			"description": "Terrain style: the longest a pillar can be if it finds no thorn terrain on the way.",
+			"default": 20,
+			"min": 1,
+			"max": 60
+		},
+		"terrain-overlap": {
+			"type": "bool",
+			"name": "Terrain Overlap",
+			"description": "Terrain style: end the pillar inside the thorn's own cell so the last block touches the thorns. Turn off to stop one cell short.",
+			"default": true
+		},
 		"corner-slope-chance": {
 			"type": "int",
 			"name": "Corner Slope Chance (%)",
@@ -50,30 +64,6 @@
 			"default": 50,
 			"min": 0,
 			"max": 100
-		},
-		"shape-padding": {
-			"type": "int",
-			"name": "Shape Padding",
-			"description": "Shapes style: how many cells the shape extends past the blocks (each side varies by 1 either way).",
-			"default": 2,
-			"min": 1,
-			"max": 6
-		},
-		"shape-max-cut": {
-			"type": "int",
-			"name": "Shape Max Corner Cut",
-			"description": "Shapes style: the largest diagonal cut on a corner, in cells. Bigger = more octagon-like.",
-			"default": 4,
-			"min": 1,
-			"max": 8
-		},
-		"shape-link-distance": {
-			"type": "int",
-			"name": "Shape Link Distance",
-			"description": "Shapes style: blocks within this many cells of each other become one shape.",
-			"default": 3,
-			"min": 1,
-			"max": 6
 		},
 		"ground-y": {
 			"type": "float",
