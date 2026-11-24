@@ -1,4 +1,4 @@
-// Structure Tools v0.7 - Pillars + Enclose styles
+// Structure Tools v0.8 - Pillars, Enclose and Shapes styles
 //
 // A small "Auto" button in the Edit tab opens the Structure Tools menu
 // (style, direction, max height, Structure, Show ID).
@@ -326,7 +326,7 @@ int subgrid(float v) {
 
 namespace {
 
-std::vector<std::string> const STYLES = { "Pillars", "Enclose" };
+std::vector<std::string> const STYLES = { "Pillars", "Enclose", "Shapes" };
 std::vector<std::string> const DIRECTIONS = { "Auto", "Down", "Up" };
 
 std::string cycle(std::vector<std::string> const& list, std::string const& cur, int delta) {
@@ -493,18 +493,22 @@ public:
         }
         auto style = Mod::get()->getSettingValue<std::string>("style");
         if (style == "Pillars") this->runPillars();
-        else if (style == "Enclose") this->runEnclose();
+        else if (style == "Enclose") this->runEnclose(false);
+        else if (style == "Shapes") this->runEnclose(true);
     }
 
     // Style 2: close blocks/slopes in with the fewest blocks that give every exposed edge
     // a line. Selection = only the selection; nothing selected = the whole level.
     // Touching structures merge into one; one-cell gaps between structures are filled.
-    void runEnclose() {
+    void runEnclose(bool shapes) {
         auto lel = m_editorLayer;
         auto selected = this->getSelectedObjects();
         bool wholeLevel = !selected || selected->count() == 0;
         CCArray* pool = wholeLevel ? lel->m_objects : selected;
         int chance = static_cast<int>(Mod::get()->getSettingValue<int64_t>("corner-slope-chance"));
+        int shapePad = static_cast<int>(Mod::get()->getSettingValue<int64_t>("shape-padding"));
+        int shapeCut = static_cast<int>(Mod::get()->getSettingValue<int64_t>("shape-max-cut"));
+        int shapeLink = static_cast<int>(Mod::get()->getSettingValue<int64_t>("shape-link-distance"));
 
         struct Item { float cx, cy; int flat, open; GameObject* block; int lines; };
         std::vector<Item> items;
@@ -602,7 +606,8 @@ public:
             //    (small structures only) so the result is a clean medium-sized shape.
             std::set<CellKey> fill;
             std::set<CellKey> visited;
-            for (auto const& kv : body) {
+            std::map<CellKey, std::pair<float, int>> forced; // Shapes: cell -> (rotation, leg mask)
+            if (!shapes) for (auto const& kv : body) {
                 CellKey k0 = kv.first;
                 if (visited.count(k0)) continue;
                 std::vector<CellKey> cluster, stack = { k0 };
@@ -649,6 +654,83 @@ public:
                 }
             }
 
+            // A') Shapes: one chamfered blob around every group of nearby blocks/slopes.
+            //     Rectangle = bounding box + random padding, then each corner is cut with a
+            //     diagonal of 45 degree slopes (cut size limited so no block/slope is touched).
+            if (shapes) {
+                std::set<CellKey> seen;
+                for (auto const& kv : body) {
+                    CellKey k0 = kv.first;
+                    if (seen.count(k0)) continue;
+                    std::vector<CellKey> cluster, stack = { k0 };
+                    seen.insert(k0);
+                    while (!stack.empty()) {
+                        auto c = stack.back();
+                        stack.pop_back();
+                        cluster.push_back(c);
+                        for (int dx = -shapeLink; dx <= shapeLink; ++dx) {
+                            for (int dy = -shapeLink; dy <= shapeLink; ++dy) {
+                                CellKey n = { c.first + dx, c.second + dy };
+                                if (body.count(n) && !seen.count(n)) { seen.insert(n); stack.push_back(n); }
+                            }
+                        }
+                    }
+
+                    int minX = k0.first, maxX = k0.first, minY = k0.second, maxY = k0.second;
+                    for (auto& c : cluster) {
+                        minX = std::min(minX, c.first); maxX = std::max(maxX, c.first);
+                        minY = std::min(minY, c.second); maxY = std::max(maxY, c.second);
+                    }
+
+                    std::uniform_int_distribution<int> padDist(std::max(1, shapePad - 1), shapePad + 1);
+                    int x0 = minX - padDist(rng), x1 = maxX + padDist(rng);
+                    int y0 = minY - padDist(rng), y1 = maxY + padDist(rng);
+                    int W = x1 - x0 + 1, H = y1 - y0 + 1;
+                    if (W * H > 1600) { ++skipped; continue; }
+
+                    struct Corner { int cx, cy, sx, sy, k; float rot; int legs; };
+                    Corner corners[4] = {
+                        { x0, y1, +1, -1, 0, 0.f,   BB | BR }, // top-left: legs bottom + right
+                        { x1, y1, -1, -1, 0, 90.f,  BB | BL }, // top-right
+                        { x1, y0, -1, +1, 0, 180.f, BT | BL }, // bottom-right
+                        { x0, y0, +1, +1, 0, 270.f, BT | BR }, // bottom-left
+                    };
+                    for (auto& cn : corners) {
+                        int minSum = 1 << 20;
+                        for (auto& c : cluster) {
+                            int dx = (c.first - cn.cx) * cn.sx;
+                            int dy = (c.second - cn.cy) * cn.sy;
+                            minSum = std::min(minSum, dx + dy);
+                        }
+                        int cap = std::min({ minSum, std::min(W, H) / 2, shapeCut });
+                        if (cap >= 1) {
+                            std::uniform_int_distribution<int> kDist(std::max(1, cap / 2), cap);
+                            cn.k = kDist(rng);
+                        }
+                    }
+
+                    for (int x = x0; x <= x1; ++x) {
+                        for (int y = y0; y <= y1; ++y) {
+                            CellKey c = { x, y };
+                            if (body.count(c)) continue;
+                            bool removedCell = false;
+                            bool slopeCell = false;
+                            float rot = 0.f;
+                            int legs = 0;
+                            for (auto& cn : corners) {
+                                if (cn.k < 1) continue;
+                                int sum = (x - cn.cx) * cn.sx + (y - cn.cy) * cn.sy;
+                                if (sum <= cn.k - 2) removedCell = true;
+                                else if (sum == cn.k - 1) { slopeCell = true; rot = cn.rot; legs = cn.legs; }
+                            }
+                            if (removedCell) continue;
+                            fill.insert(c);
+                            if (slopeCell) forced[c] = { rot, legs };
+                        }
+                    }
+                }
+            }
+
             // Fill one-cell gaps between structures that are almost touching.
             {
                 std::set<CellKey> foot;
@@ -677,7 +759,11 @@ public:
                 int e = 0;
                 for (auto const& d : DIRS) {
                     CellKey n = { c.first + d.dx, c.second + d.dy };
-                    bool covered = fill.count(n) > 0;
+                    bool covered = false;
+                    if (fill.count(n) > 0) {
+                        auto fz = forced.find(n);
+                        covered = fz == forced.end() || (fz->second.second & d.opp);
+                    }
                     if (!covered) {
                         auto bi = body.find(n);
                         if (bi != body.end() && (bi->second.flat & d.opp)) covered = true;
@@ -695,7 +781,12 @@ public:
                 float rot = 0.f;
                 bool corner = exposed == (BT | BR) || exposed == (BR | BB) ||
                               exposed == (BB | BL) || exposed == (BT | BL);
-                if (corner && pct(rng) <= chance) {
+                auto fz = forced.find(c);
+                if (fz != forced.end()) {
+                    id = ID_SLOPE45;
+                    rot = fz->second.first;
+                    ++slopes;
+                } else if (!shapes && corner && pct(rng) <= chance) {
                     id = ID_SLOPE45;
                     rot = slopeRotationForLegs(15 & ~exposed); // legs face the neighbours
                     ++slopes;
@@ -748,7 +839,7 @@ public:
             for (auto obj : CCArrayExt<GameObject*>(removed)) lel->removeObject(obj, true);
         }
 
-        std::string msg = fmt::format("Enclosed with {} blocks ({} slopes)", placed - slopes, slopes);
+        std::string msg = fmt::format("{} with {} blocks ({} slopes)", shapes ? "Shaped" : "Enclosed", placed - slopes, slopes);
         if (fixedLines > 0) msg += fmt::format(", fixed {} lines (Ctrl+Z twice)", fixedLines);
         if (skipped > 0) msg += fmt::format(" ({} skipped)", skipped);
         if (partial) msg += " - a lone cell needs 4 lines, left one open";
