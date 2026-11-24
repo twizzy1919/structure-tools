@@ -1,0 +1,38 @@
+{
+	"geode": "5.11.2",
+	"gd": {
+		"win": "2.2081"
+	},
+	"id": "yourname.structure-tools",
+	"name": "Structure Tools",
+	"version": "v0.1.0",
+	"developer": "YourName",
+	"description": "Auto-builds level structure in the editor. Stage 1: fill pillars under platforms.",
+	"tags": ["editor", "utility"],
+	"settings": {
+		"fill-block-id": {
+			"type": "int",
+			"name": "Fill Block ID",
+			"description": "Object ID used to fill pillars. <cy>0</c> = use the same block as the platform (solid blocks only). Slopes always need an ID here. Easiest way to set it: select ONE block in the editor and press <cg>Pick ID</c>.",
+			"default": 0,
+			"min": 0,
+			"max": 5000
+		},
+		"ground-y": {
+			"type": "float",
+			"name": "Ground Row Y",
+			"description": "Y position of the lowest block row sitting on the ground. In the normal editor this is <cy>105</c>. Pillars stop here.",
+			"default": 105,
+			"min": 0,
+			"max": 3000
+		},
+		"max-rows": {
+			"type": "int",
+			"name": "Max Pillar Height",
+			"description": "Safety limit: the most blocks one pillar can have (in rows).",
+			"default": 100,
+			"min": 1,
+			"max": 500
+		}
+	}
+}
