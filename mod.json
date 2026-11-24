@@ -5,7 +5,7 @@
 	},
 	"id": "twizzymik.structure-tools",
 	"name": "Structure Tools",
-	"version": "v0.6.0",
+	"version": "v0.7.0",
 	"developer": "twizzymik",
 	"description": "Auto-builds level structure in the editor: pillars and enclosures.",
 	"tags": [
