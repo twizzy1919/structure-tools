@@ -125,7 +125,7 @@ struct OccupancyIndex {
     void add(GameObject* o) { columns[columnKey(o->getPositionX())].push_back(o); }
     // Anything whose centre is within (tx, ty) of this point. Terrain is placed freely,
     // so it is matched more loosely than blocks.
-    bool near(float x, float y, float tx, float ty) const {
+    bool withinBox(float x, float y, float tx, float ty) const {
         int k = columnKey(x);
         for (int c = k - 2; c <= k + 2; ++c) {
             auto it = columns.find(c);
@@ -904,7 +904,7 @@ public:
             for (int row = 0; row < maxRows; ++row) {
                 float y = src.y + static_cast<float>(src.dir) * GRID * static_cast<float>(row);
                 if (src.dir < 0 && y < groundY - 0.5f) break;
-                if (terrain && terrainIndex.near(p.x, y, 20.f, 20.f)) {
+                if (terrain && terrainIndex.withinBox(p.x, y, 20.f, 20.f)) {
                     // Reached the thorns: end inside their cell so the blocks touch them.
                     if (overlap && !index.occupied(p.x, y)) { p.ys.push_back(y); ++total; }
                     break;
