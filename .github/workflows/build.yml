@@ -19,7 +19,7 @@ jobs:
           # IMPORTANT: GD 2.2081 needs the Geode 5.x SDK.
           # 'latest' is fine today (5.11.2). If Geode 6 ever becomes the latest stable
           # release, pin this to the 5.x version instead (see the instructions).
-          sdk: latest
+          sdk: v5.11.2
 
       - name: Upload the .geode file
         uses: actions/upload-artifact@v4
