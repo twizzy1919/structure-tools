@@ -1,4 +1,4 @@
-// Structure Tools v0.8 - Pillars, Enclose and Shapes styles
+// Structure Tools v0.9 - Pillars, Enclose and Terrain styles
 //
 // A small "Auto" button in the Edit tab opens the Structure Tools menu
 // (style, direction, max height, Structure, Show ID).
@@ -50,6 +50,9 @@ constexpr int ID_NONE = 5;
 constexpr int ID_SIDES = 7;
 constexpr int ID_SLOPE45 = 1743;
 constexpr int ID_SLOPE2X1 = 1744;
+
+// Black thorn terrain pieces: 1716 flat strip, 1717 45 degree, 1718 2x1 shallow.
+bool isTerrain(int id) { return id == 1716 || id == 1717 || id == 1718; }
 
 enum class Side { Top, Right, Bottom, Left };
 
@@ -120,6 +123,20 @@ struct OccupancyIndex {
     std::unordered_map<int, std::vector<GameObject*>> columns;
     static int columnKey(float x) { return static_cast<int>(std::floor(x / GRID)); }
     void add(GameObject* o) { columns[columnKey(o->getPositionX())].push_back(o); }
+    // Anything whose centre is within (tx, ty) of this point. Terrain is placed freely,
+    // so it is matched more loosely than blocks.
+    bool near(float x, float y, float tx, float ty) const {
+        int k = columnKey(x);
+        for (int c = k - 2; c <= k + 2; ++c) {
+            auto it = columns.find(c);
+            if (it == columns.end()) continue;
+            for (auto* o : it->second) {
+                if (std::fabs(o->getPositionX() - x) < tx &&
+                    std::fabs(o->getPositionY() - y) < ty) return true;
+            }
+        }
+        return false;
+    }
     bool occupied(float x, float y) const {
         int k = columnKey(x);
         for (int c = k - 1; c <= k + 1; ++c) {
@@ -326,7 +343,7 @@ int subgrid(float v) {
 
 namespace {
 
-std::vector<std::string> const STYLES = { "Pillars", "Enclose", "Shapes" };
+std::vector<std::string> const STYLES = { "Pillars", "Enclose", "Terrain" };
 std::vector<std::string> const DIRECTIONS = { "Auto", "Down", "Up" };
 
 std::string cycle(std::vector<std::string> const& list, std::string const& cur, int delta) {
@@ -416,7 +433,7 @@ public:
 
         auto style = Mod::get()->getSettingValue<std::string>("style");
         auto dir = Mod::get()->getSettingValue<std::string>("direction");
-        int rows = std::clamp(static_cast<int>(Mod::get()->getSettingValue<int64_t>("max-rows")), 1, 30);
+        int rows = this->currentRows();
 
         // Origin of this menu is the Close button; the box spans about +26 (bottom) to +229 (top).
         float y1 = 165.f, y2 = 130.f, y3 = 95.f, y4 = 55.f;
@@ -448,6 +465,7 @@ public:
         auto v = cycle(STYLES, Mod::get()->getSettingValue<std::string>("style"), delta);
         Mod::get()->setSettingValue<std::string>("style", v);
         if (m_fields->styleLabel) m_fields->styleLabel->setString(v.c_str());
+        if (m_fields->rowsLabel) m_fields->rowsLabel->setString(std::to_string(this->currentRows()).c_str());
     }
 
     void onDirPrev(CCObject*) { this->changeDir(-1); }
@@ -460,10 +478,16 @@ public:
 
     void onRowsMinus(CCObject*) { this->changeRows(-1); }
     void onRowsPlus(CCObject*) { this->changeRows(+1); }
+    // The Max height row edits the Terrain length when that style is chosen.
+    bool terrainStyle() { return Mod::get()->getSettingValue<std::string>("style") == "Terrain"; }
+    int rowsMax() { return terrainStyle() ? 60 : 30; }
+    int currentRows() {
+        char const* key = terrainStyle() ? "terrain-max-length" : "max-rows";
+        return std::clamp(static_cast<int>(Mod::get()->getSettingValue<int64_t>(key)), 1, rowsMax());
+    }
     void changeRows(int delta) {
-        int rows = static_cast<int>(Mod::get()->getSettingValue<int64_t>("max-rows")) + delta;
-        rows = std::clamp(rows, 1, 30);
-        Mod::get()->setSettingValue<int64_t>("max-rows", rows);
+        int rows = std::clamp(this->currentRows() + delta, 1, rowsMax());
+        Mod::get()->setSettingValue<int64_t>(terrainStyle() ? "terrain-max-length" : "max-rows", rows);
         if (m_fields->rowsLabel) m_fields->rowsLabel->setString(std::to_string(rows).c_str());
     }
 
@@ -492,23 +516,20 @@ public:
             m_fields->panel = nullptr;
         }
         auto style = Mod::get()->getSettingValue<std::string>("style");
-        if (style == "Pillars") this->runPillars();
-        else if (style == "Enclose") this->runEnclose(false);
-        else if (style == "Shapes") this->runEnclose(true);
+        if (style == "Pillars") this->runPillars(false);
+        else if (style == "Enclose") this->runEnclose();
+        else if (style == "Terrain") this->runPillars(true);
     }
 
     // Style 2: close blocks/slopes in with the fewest blocks that give every exposed edge
     // a line. Selection = only the selection; nothing selected = the whole level.
     // Touching structures merge into one; one-cell gaps between structures are filled.
-    void runEnclose(bool shapes) {
+    void runEnclose() {
         auto lel = m_editorLayer;
         auto selected = this->getSelectedObjects();
         bool wholeLevel = !selected || selected->count() == 0;
         CCArray* pool = wholeLevel ? lel->m_objects : selected;
         int chance = static_cast<int>(Mod::get()->getSettingValue<int64_t>("corner-slope-chance"));
-        int shapePad = static_cast<int>(Mod::get()->getSettingValue<int64_t>("shape-padding"));
-        int shapeCut = static_cast<int>(Mod::get()->getSettingValue<int64_t>("shape-max-cut"));
-        int shapeLink = static_cast<int>(Mod::get()->getSettingValue<int64_t>("shape-link-distance"));
 
         struct Item { float cx, cy; int flat, open; GameObject* block; int lines; };
         std::vector<Item> items;
@@ -606,8 +627,7 @@ public:
             //    (small structures only) so the result is a clean medium-sized shape.
             std::set<CellKey> fill;
             std::set<CellKey> visited;
-            std::map<CellKey, std::pair<float, int>> forced; // Shapes: cell -> (rotation, leg mask)
-            if (!shapes) for (auto const& kv : body) {
+            for (auto const& kv : body) {
                 CellKey k0 = kv.first;
                 if (visited.count(k0)) continue;
                 std::vector<CellKey> cluster, stack = { k0 };
@@ -654,83 +674,6 @@ public:
                 }
             }
 
-            // A') Shapes: one chamfered blob around every group of nearby blocks/slopes.
-            //     Rectangle = bounding box + random padding, then each corner is cut with a
-            //     diagonal of 45 degree slopes (cut size limited so no block/slope is touched).
-            if (shapes) {
-                std::set<CellKey> seen;
-                for (auto const& kv : body) {
-                    CellKey k0 = kv.first;
-                    if (seen.count(k0)) continue;
-                    std::vector<CellKey> cluster, stack = { k0 };
-                    seen.insert(k0);
-                    while (!stack.empty()) {
-                        auto c = stack.back();
-                        stack.pop_back();
-                        cluster.push_back(c);
-                        for (int dx = -shapeLink; dx <= shapeLink; ++dx) {
-                            for (int dy = -shapeLink; dy <= shapeLink; ++dy) {
-                                CellKey n = { c.first + dx, c.second + dy };
-                                if (body.count(n) && !seen.count(n)) { seen.insert(n); stack.push_back(n); }
-                            }
-                        }
-                    }
-
-                    int minX = k0.first, maxX = k0.first, minY = k0.second, maxY = k0.second;
-                    for (auto& c : cluster) {
-                        minX = std::min(minX, c.first); maxX = std::max(maxX, c.first);
-                        minY = std::min(minY, c.second); maxY = std::max(maxY, c.second);
-                    }
-
-                    std::uniform_int_distribution<int> padDist(std::max(1, shapePad - 1), shapePad + 1);
-                    int x0 = minX - padDist(rng), x1 = maxX + padDist(rng);
-                    int y0 = minY - padDist(rng), y1 = maxY + padDist(rng);
-                    int W = x1 - x0 + 1, H = y1 - y0 + 1;
-                    if (W * H > 1600) { ++skipped; continue; }
-
-                    struct Corner { int cx, cy, sx, sy, k; float rot; int legs; };
-                    Corner corners[4] = {
-                        { x0, y1, +1, -1, 0, 0.f,   BB | BR }, // top-left: legs bottom + right
-                        { x1, y1, -1, -1, 0, 90.f,  BB | BL }, // top-right
-                        { x1, y0, -1, +1, 0, 180.f, BT | BL }, // bottom-right
-                        { x0, y0, +1, +1, 0, 270.f, BT | BR }, // bottom-left
-                    };
-                    for (auto& cn : corners) {
-                        int minSum = 1 << 20;
-                        for (auto& c : cluster) {
-                            int dx = (c.first - cn.cx) * cn.sx;
-                            int dy = (c.second - cn.cy) * cn.sy;
-                            minSum = std::min(minSum, dx + dy);
-                        }
-                        int cap = std::min({ minSum, std::min(W, H) / 2, shapeCut });
-                        if (cap >= 1) {
-                            std::uniform_int_distribution<int> kDist(std::max(1, cap / 2), cap);
-                            cn.k = kDist(rng);
-                        }
-                    }
-
-                    for (int x = x0; x <= x1; ++x) {
-                        for (int y = y0; y <= y1; ++y) {
-                            CellKey c = { x, y };
-                            if (body.count(c)) continue;
-                            bool removedCell = false;
-                            bool slopeCell = false;
-                            float rot = 0.f;
-                            int legs = 0;
-                            for (auto& cn : corners) {
-                                if (cn.k < 1) continue;
-                                int sum = (x - cn.cx) * cn.sx + (y - cn.cy) * cn.sy;
-                                if (sum <= cn.k - 2) removedCell = true;
-                                else if (sum == cn.k - 1) { slopeCell = true; rot = cn.rot; legs = cn.legs; }
-                            }
-                            if (removedCell) continue;
-                            fill.insert(c);
-                            if (slopeCell) forced[c] = { rot, legs };
-                        }
-                    }
-                }
-            }
-
             // Fill one-cell gaps between structures that are almost touching.
             {
                 std::set<CellKey> foot;
@@ -759,11 +702,7 @@ public:
                 int e = 0;
                 for (auto const& d : DIRS) {
                     CellKey n = { c.first + d.dx, c.second + d.dy };
-                    bool covered = false;
-                    if (fill.count(n) > 0) {
-                        auto fz = forced.find(n);
-                        covered = fz == forced.end() || (fz->second.second & d.opp);
-                    }
+                    bool covered = fill.count(n) > 0;
                     if (!covered) {
                         auto bi = body.find(n);
                         if (bi != body.end() && (bi->second.flat & d.opp)) covered = true;
@@ -781,12 +720,7 @@ public:
                 float rot = 0.f;
                 bool corner = exposed == (BT | BR) || exposed == (BR | BB) ||
                               exposed == (BB | BL) || exposed == (BT | BL);
-                auto fz = forced.find(c);
-                if (fz != forced.end()) {
-                    id = ID_SLOPE45;
-                    rot = fz->second.first;
-                    ++slopes;
-                } else if (!shapes && corner && pct(rng) <= chance) {
+                if (corner && pct(rng) <= chance) {
                     id = ID_SLOPE45;
                     rot = slopeRotationForLegs(15 & ~exposed); // legs face the neighbours
                     ++slopes;
@@ -839,7 +773,7 @@ public:
             for (auto obj : CCArrayExt<GameObject*>(removed)) lel->removeObject(obj, true);
         }
 
-        std::string msg = fmt::format("{} with {} blocks ({} slopes)", shapes ? "Shaped" : "Enclosed", placed - slopes, slopes);
+        std::string msg = fmt::format("Enclosed with {} blocks ({} slopes)", placed - slopes, slopes);
         if (fixedLines > 0) msg += fmt::format(", fixed {} lines (Ctrl+Z twice)", fixedLines);
         if (skipped > 0) msg += fmt::format(" ({} skipped)", skipped);
         if (partial) msg += " - a lone cell needs 4 lines, left one open";
@@ -853,11 +787,14 @@ public:
         }
     }
 
-    void runPillars() {
+    // terrain = true: pillars keep going until they reach black thorn terrain (IDs 1716-1718)
+    // and end inside its cell so they connect; with no terrain they run to the ground.
+    void runPillars(bool terrain) {
         auto lel = m_editorLayer;
         auto setting = Mod::get()->getSettingValue<std::string>("direction");
         float groundY = static_cast<float>(Mod::get()->getSettingValue<double>("ground-y"));
-        int maxRows = static_cast<int>(Mod::get()->getSettingValue<int64_t>("max-rows"));
+        int maxRows = static_cast<int>(Mod::get()->getSettingValue<int64_t>(terrain ? "terrain-max-length" : "max-rows"));
+        bool overlap = Mod::get()->getSettingValue<bool>("terrain-overlap");
 
         auto selected = this->getSelectedObjects();
         bool wholeLevel = !selected || selected->count() == 0;
@@ -946,6 +883,13 @@ public:
             if (isBlocking(obj)) index.add(obj);
         }
 
+        OccupancyIndex terrainIndex;
+        if (terrain) {
+            for (auto obj : CCArrayExt<GameObject*>(lel->m_objects)) {
+                if (isTerrain(obj->m_objectID)) terrainIndex.add(obj);
+            }
+        }
+
         NeighborIndex nbr;
         for (auto obj : CCArrayExt<GameObject*>(lel->m_objects)) nbr.add(obj);
 
@@ -960,6 +904,11 @@ public:
             for (int row = 0; row < maxRows; ++row) {
                 float y = src.y + static_cast<float>(src.dir) * GRID * static_cast<float>(row);
                 if (src.dir < 0 && y < groundY - 0.5f) break;
+                if (terrain && terrainIndex.near(p.x, y, 20.f, 20.f)) {
+                    // Reached the thorns: end inside their cell so the blocks touch them.
+                    if (overlap && !index.occupied(p.x, y)) { p.ys.push_back(y); ++total; }
+                    break;
+                }
                 if (index.occupied(p.x, y)) break;
                 p.ys.push_back(y);
                 ++total;
