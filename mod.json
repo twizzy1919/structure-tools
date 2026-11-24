@@ -5,18 +5,24 @@
 	},
 	"id": "twizzymik.structure-tools",
 	"name": "Structure Tools",
-	"version": "v0.2.0",
+	"version": "v0.3.0",
 	"developer": "twizzymik",
-	"description": "Auto-builds level structure in the editor. Pillars down and up.",
+	"description": "Auto-builds level structure in the editor. Pillars so far.",
 	"tags": ["editor", "utility"],
 	"settings": {
-		"fill-block-id": {
-			"type": "int",
-			"name": "Pillar Block ID",
-			"description": "Object ID that pillars are built from. Use the block variant with lines on the <cy>sides only</c> so the pillar looks continuous. Easiest way to set it: select ONE block in the editor and press <cg>Pick</c>. <cy>0</c> = fall back to the platform's own block (solid blocks only; slopes always need an ID).",
-			"default": 0,
-			"min": 0,
-			"max": 5000
+		"style": {
+			"type": "string",
+			"name": "Style",
+			"description": "Structuring style used by the Auto button. More styles are coming.",
+			"default": "Pillars",
+			"one-of": ["Pillars"]
+		},
+		"direction": {
+			"type": "string",
+			"name": "Direction",
+			"description": "<cy>Auto</c> reads the lines on each block: top line = grows down, bottom line = grows up. Down / Up force one direction for everything.",
+			"default": "Auto",
+			"one-of": ["Auto", "Down", "Up"]
 		},
 		"max-rows": {
 			"type": "int",
@@ -29,7 +35,7 @@
 		"ground-y": {
 			"type": "float",
 			"name": "Ground Row Y",
-			"description": "Y position of the lowest block row sitting on the ground. In the normal editor this is <cy>105</c>. Downward pillars never go below this.",
+			"description": "Y position of the lowest block row on the ground (<cy>105</c> in the normal editor). Downward pillars never go below it.",
 			"default": 105,
 			"min": 0,
 			"max": 3000
@@ -37,7 +43,7 @@
 		"button-offset-x": {
 			"type": "float",
 			"name": "Button Offset X",
-			"description": "Nudge the Down / Up / Pick buttons left (negative) or right (positive). Takes effect next time you open the editor.",
+			"description": "Nudge the Auto button left (negative) or right (positive). Applies next time the editor opens.",
 			"default": 0,
 			"min": -400,
 			"max": 400
@@ -45,7 +51,7 @@
 		"button-offset-y": {
 			"type": "float",
 			"name": "Button Offset Y",
-			"description": "Nudge the Down / Up / Pick buttons down (negative) or up (positive). Takes effect next time you open the editor.",
+			"description": "Nudge the Auto button down (negative) or up (positive). Applies next time the editor opens.",
 			"default": 0,
 			"min": -200,
 			"max": 400
