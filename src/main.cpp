@@ -658,8 +658,8 @@ public:
                 for (auto& f : foot) {
                     for (auto const& d : DIRS) {
                         CellKey mid = { f.first + d.dx, f.second + d.dy };
-                        CellKey far = { f.first + 2 * d.dx, f.second + 2 * d.dy };
-                        if (!foot.count(mid) && foot.count(far)) gaps.push_back(mid);
+                        CellKey beyond = { f.first + 2 * d.dx, f.second + 2 * d.dy };
+                        if (!foot.count(mid) && foot.count(beyond)) gaps.push_back(mid);
                     }
                 }
                 for (auto& g : gaps) fill.insert(g);
